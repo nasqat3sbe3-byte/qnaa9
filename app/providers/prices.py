@@ -24,7 +24,6 @@ async def _fetch_stockanalysis_bars(client: httpx.AsyncClient, symbol: str, star
         "Accept-Language": "en-US,en;q=0.9",
     }
     bars_by_date = {}
-    # 3 pages x 50 rows covers the whole Jun-Sep window with room to spare.
     for page in range(1, 4):
         url = STOCKANALYSIS_HISTORY_URL.format(symbol=symbol.lower())
         params = {"p": page} if page > 1 else None
@@ -66,7 +65,6 @@ async def _fetch_stockanalysis_bars(client: httpx.AsyncClient, symbol: str, star
                 "low": l,
                 "close": c,
                 "volume": volume,
-                "source": "stockanalysis",
             }
         if found_older:
             break
@@ -119,7 +117,6 @@ async def _fetch_yahoo_bars(client: httpx.AsyncClient, symbol: str, start: date,
                     "low": float(l),
                     "close": float(c),
                     "volume": float(volumes[i]) if i < len(volumes) and volumes[i] is not None else None,
-                    "source": "yahoo_fallback",
                 })
             return bars
         except Exception as exc:
@@ -129,7 +126,6 @@ async def _fetch_yahoo_bars(client: httpx.AsyncClient, symbol: str, start: date,
 
 
 async def fetch_daily_bars(client: httpx.AsyncClient, symbol: str, start: date, end: date):
-    # Accuracy first: use StockAnalysis/S&P history when available. Yahoo is fallback only.
     bars = await _fetch_stockanalysis_bars(client, symbol, start, end)
     if bars:
         return bars
