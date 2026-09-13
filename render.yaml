@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: qanas-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: qanas-db
+          property: connectionString
+  - type: cron
+    name: qanas-split-sync
+    runtime: python
+    schedule: "*/10 * * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scripts/sync_splits.py
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: qanas-db
+          property: connectionString
+
+databases:
+  - name: qanas-db
+    databaseName: qanas
+    user: qanas
