@@ -1,6 +1,6 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from ..models import Split, DailyBar, BorrowSnapshot
+from ..models import Split, DailyBar, FourHourBar, BorrowSnapshot
 from .scoring import compute_score
 
 
@@ -22,7 +22,7 @@ def refresh_split_metrics(db: Session, split: Split):
     split_day = bars[0]
     split.post_split_open = split_day.open
 
-    # Highest price seen after the split (all sessions).
+    # Highest trusted daily price seen after the split (all sessions).
     split.post_split_high = max(b.high for b in bars)
 
     # Post-split low/current metrics.
@@ -32,12 +32,23 @@ def refresh_split_metrics(db: Session, split: Split):
     split.distance_from_low_pct = ((split.current_price / new_low) - 1) * 100 if new_low else None
 
     # Qanas half-level rule:
-    # Do NOT use the opening price. Use the highest price reached on the
-    # first post-split trading day. Example: open 3, split-day high 7 => half=3.50.
-    split_day_high = split_day.high
-    split.half_level = split_day_high / 2 if split_day_high else None
+    # Reference = highest *intraday* price reached on the split effective date,
+    # including pre-market/after-hours. Do not fall back to the daily candle high;
+    # if intraday data is unavailable, leave this signal unknown instead of wrong.
+    intraday_split_day = db.scalars(
+        select(FourHourBar)
+        .where(FourHourBar.stock_id == split.stock_id)
+        .order_by(FourHourBar.bar_time.asc())
+    ).all()
+    intraday_split_day = [
+        b for b in intraday_split_day
+        if b.bar_time.date() == split.effective_date
+    ]
+    split_day_intraday_high = max((b.high for b in intraday_split_day), default=None)
+    split.half_level = split_day_intraday_high / 2 if split_day_intraday_high else None
 
-    # Consider the level reached if any post-split session traded at/below it.
+    # Once the intraday reference exists, consider the half level reached if any
+    # trusted post-split daily low traded at or below it.
     split.half_level_reached = bool(
         split.half_level is not None
         and any(b.low <= split.half_level for b in bars)
