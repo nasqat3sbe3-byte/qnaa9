@@ -47,26 +47,47 @@ def _four_hour_stats(db: Session, stock_id: int, effective_date: date):
 
 
 def _split_day_stats(db: Session, stock_id: int, effective_date: date):
-    first_bar = db.scalar(
+    daily = db.scalar(
         select(DailyBar)
         .where(DailyBar.stock_id == stock_id, DailyBar.trade_date >= effective_date)
         .order_by(DailyBar.trade_date.asc())
         .limit(1)
     )
-    if not first_bar:
+
+    intraday = db.scalars(
+        select(FourHourBar)
+        .where(FourHourBar.stock_id == stock_id)
+        .order_by(FourHourBar.bar_time.asc())
+    ).all()
+    split_day_intraday = [b for b in intraday if b.bar_time.date() == effective_date]
+    intraday_high = max((b.high for b in split_day_intraday), default=None)
+    intraday_high_bar = None
+    if split_day_intraday:
+        intraday_high_bar = max(split_day_intraday, key=lambda b: b.high)
+
+    if not daily:
         return {
-            "split_day_date": None,
+            "split_day_date": effective_date,
             "split_day_open": None,
-            "split_day_high": None,
+            "split_day_high": intraday_high,
+            "split_day_intraday_high": intraday_high,
+            "split_day_intraday_high_time": intraday_high_bar.bar_time.isoformat() if intraday_high_bar else None,
+            "split_day_daily_high": None,
             "split_day_low": None,
             "split_day_close": None,
         }
+
     return {
-        "split_day_date": first_bar.trade_date,
-        "split_day_open": first_bar.open,
-        "split_day_high": first_bar.high,
-        "split_day_low": first_bar.low,
-        "split_day_close": first_bar.close,
+        "split_day_date": daily.trade_date,
+        "split_day_open": daily.open,
+        # Qanas definition: split_day_high means the real intraday maximum for
+        # the effective date, including extended hours. Keep daily high separate.
+        "split_day_high": intraday_high,
+        "split_day_intraday_high": intraday_high,
+        "split_day_intraday_high_time": intraday_high_bar.bar_time.isoformat() if intraday_high_bar else None,
+        "split_day_daily_high": daily.high,
+        "split_day_low": daily.low,
+        "split_day_close": daily.close,
     }
 
 
@@ -84,7 +105,7 @@ def _split_payload(db: Session, sp: Split, s: Stock):
         "distance_from_low_pct": sp.distance_from_low_pct,
         "stability_sessions": sp.stability_sessions,
         "half_level": sp.half_level,
-        "half_level_reference": "split_day_high",
+        "half_level_reference": "split_day_intraday_high",
         "half_level_reached": sp.half_level_reached,
         "ready_score": sp.ready_score,
     }
@@ -183,7 +204,7 @@ def hunt(db: Session = Depends(get_db)):
             "distance_from_low_pct": sp.distance_from_low_pct,
             "stability_sessions": sp.stability_sessions,
             "half_level": sp.half_level,
-            "half_level_reference": "split_day_high",
+            "half_level_reference": "split_day_intraday_high",
             "half_level_reached": sp.half_level_reached,
             "post_split_open": sp.post_split_open,
             "post_split_high": sp.post_split_high,
