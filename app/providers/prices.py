@@ -26,7 +26,6 @@ async def _fetch_stockanalysis_bars(client: httpx.AsyncClient, symbol: str, star
         "Accept-Language": "en-US,en;q=0.9",
     }
     bars_by_date = {}
-    # Up to 8 pages comfortably covers Jun-Sep even if page size changes.
     for page in range(1, 9):
         url = STOCKANALYSIS_HISTORY_URL.format(symbol=symbol.lower())
         params = {"p": page} if page > 1 else None
@@ -72,28 +71,17 @@ async def _fetch_stockanalysis_bars(client: httpx.AsyncClient, symbol: str, star
 
 
 async def fetch_daily_bars(client: httpx.AsyncClient, symbol: str, start: date, end: date):
-    """Trusted daily layer: StockAnalysis/S&P only.
-
-    We intentionally do not fall back to Yahoo for daily OHLC because split-day
-    history can disagree on reverse-split/ADS symbols. Missing trusted data is
-    preferable to silently storing wrong data.
-    """
     bars = await _fetch_stockanalysis_bars(client, symbol, start, end)
     if not bars:
         raise RuntimeError(f"No trusted daily bars returned for {symbol}")
     return bars
 
 
-async def fetch_four_hour_bars(client: httpx.AsyncClient, symbol: str, start: date, end: date):
-    """Build regular-session 4h candles from Yahoo 1h data.
-
-    Intraday source is kept separate from the trusted daily layer. Four-hour
-    candles are grouped by trading date in New York time, four 1h bars at a time.
-    """
+async def _fetch_intraday(client: httpx.AsyncClient, symbol: str, start: date, end: date, interval: str):
     params = {
         "period1": _period_ts(start),
         "period2": _period_ts(end + timedelta(days=1)),
-        "interval": "1h",
+        "interval": interval,
         "events": "history",
         "includeAdjustedClose": "false",
         "includePrePost": "false",
@@ -112,8 +100,7 @@ async def fetch_four_hour_bars(client: httpx.AsyncClient, symbol: str, start: da
     lows = quote.get("low") or []
     closes = quote.get("close") or []
     volumes = quote.get("volume") or []
-
-    by_day = {}
+    rows = []
     for i, ts in enumerate(timestamps):
         if i >= min(len(opens), len(highs), len(lows), len(closes)):
             continue
@@ -125,20 +112,51 @@ async def fetch_four_hour_bars(client: httpx.AsyncClient, symbol: str, start: da
         d = dt_ny.date()
         if d < start or d > end:
             continue
-        by_day.setdefault(d, []).append({
+        rows.append({
             "ts": dt_utc.replace(tzinfo=None),
+            "date": d,
             "open": float(o),
             "high": float(h),
             "low": float(l),
             "close": float(c),
             "volume": float(volumes[i]) if i < len(volumes) and volumes[i] is not None else 0.0,
         })
+    return rows
+
+
+async def fetch_four_hour_bars(client: httpx.AsyncClient, symbol: str, start: date, end: date):
+    """Build regular-session 4h candles from intraday data.
+
+    Try Yahoo 60m first, then 30m. The 4h rise metric is later computed as
+    (4h candle high / 4h candle open - 1) * 100.
+    """
+    last_error = None
+    intraday = []
+    interval = None
+    for candidate in ("60m", "30m"):
+        try:
+            intraday = await _fetch_intraday(client, symbol, start, end, candidate)
+            if intraday:
+                interval = candidate
+                break
+        except Exception as exc:
+            last_error = exc
+            await asyncio.sleep(0.25)
+    if not intraday:
+        if last_error:
+            raise last_error
+        return []
+
+    per_chunk = 4 if interval == "60m" else 8
+    by_day = {}
+    for row in intraday:
+        by_day.setdefault(row["date"], []).append(row)
 
     out = []
     for d in sorted(by_day):
         day_bars = sorted(by_day[d], key=lambda x: x["ts"])
-        for idx in range(0, len(day_bars), 4):
-            chunk = day_bars[idx:idx + 4]
+        for idx in range(0, len(day_bars), per_chunk):
+            chunk = day_bars[idx:idx + per_chunk]
             if not chunk:
                 continue
             out.append({
@@ -148,6 +166,6 @@ async def fetch_four_hour_bars(client: httpx.AsyncClient, symbol: str, start: da
                 "low": min(x["low"] for x in chunk),
                 "close": chunk[-1]["close"],
                 "volume": sum(x["volume"] for x in chunk),
-                "source": "yahoo_1h",
+                "source": f"yahoo_{interval}",
             })
     return out
