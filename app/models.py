@@ -44,6 +44,19 @@ class DailyBar(Base):
     close: Mapped[float] = mapped_column(Float)
     volume: Mapped[float | None] = mapped_column(Float)
 
+class FourHourBar(Base):
+    __tablename__ = "four_hour_bars"
+    __table_args__ = (UniqueConstraint("stock_id", "bar_time", name="uq_4h_bar_stock_time"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    bar_time: Mapped[datetime] = mapped_column(DateTime, index=True)
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float | None] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(32), default="yahoo_1h")
+
 class BorrowSnapshot(Base):
     __tablename__ = "borrow_snapshots"
     id: Mapped[int] = mapped_column(primary_key=True)
