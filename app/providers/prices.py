@@ -84,7 +84,9 @@ async def _fetch_intraday(client: httpx.AsyncClient, symbol: str, start: date, e
         "interval": interval,
         "events": "history",
         "includeAdjustedClose": "false",
-        "includePrePost": "false",
+        # Qanas split-day reference must include the full trading day, including
+        # pre-market/after-hours, because reverse-split spikes can occur there.
+        "includePrePost": "true",
     }
     url = YAHOO_CHART_URL.format(symbol=symbol)
     response = await client.get(url, params=params)
@@ -125,10 +127,11 @@ async def _fetch_intraday(client: httpx.AsyncClient, symbol: str, start: date, e
 
 
 async def fetch_four_hour_bars(client: httpx.AsyncClient, symbol: str, start: date, end: date):
-    """Build regular-session 4h candles from intraday data.
+    """Build 4h candles from intraday data, including extended hours.
 
-    Try Yahoo 60m first, then 30m. The 4h rise metric is later computed as
-    (4h candle high / 4h candle open - 1) * 100.
+    Try Yahoo 60m first, then 30m. The split-day high is the maximum High
+    across all generated 4h candles on the effective date, so the underlying
+    intraday maximum is preserved.
     """
     last_error = None
     intraday = []
@@ -166,6 +169,6 @@ async def fetch_four_hour_bars(client: httpx.AsyncClient, symbol: str, start: da
                 "low": min(x["low"] for x in chunk),
                 "close": chunk[-1]["close"],
                 "volume": sum(x["volume"] for x in chunk),
-                "source": f"yahoo_{interval}",
+                "source": f"yahoo_{interval}_prepost",
             })
     return out
