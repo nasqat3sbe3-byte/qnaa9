@@ -33,7 +33,7 @@ def _clear_metrics(split: Split):
     split.ready_score = None
 
 
-async def _fetch_one(client, sem, symbol, start, end):
+async def _fetch_one(client, sem, split_id, symbol, start, end):
     async with sem:
         daily = None
         fourh = []
@@ -47,7 +47,7 @@ async def _fetch_one(client, sem, symbol, start, end):
             fourh = await fetch_four_hour_bars(client, symbol, start, end)
         except Exception as exc:
             fourh_err = str(exc)
-        return symbol, daily, fourh, daily_err, fourh_err
+        return split_id, daily, fourh, daily_err, fourh_err
 
 
 async def run_price_sync(start=date(2026, 6, 1), end=date(2026, 9, 30)):
@@ -65,8 +65,6 @@ async def run_price_sync(start=date(2026, 6, 1), end=date(2026, 9, 30)):
     })
     db = SessionLocal()
     try:
-        # Corporate actions are refreshed before prices so stale ratios (e.g. YMT)
-        # are corrected before any downstream calculations run.
         await sync_splits(db, start=start, end=end)
 
         today = date.today()
@@ -85,42 +83,60 @@ async def run_price_sync(start=date(2026, 6, 1), end=date(2026, 9, 30)):
         sem = asyncio.Semaphore(4)
         headers = {"User-Agent": "Mozilla/5.0 QanasDataEngine/1.0"}
         async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
-            tasks = [_fetch_one(client, sem, stock.symbol, split.effective_date, today) for split, stock in rows]
+            tasks = [
+                _fetch_one(client, sem, split.id, stock.symbol, split.effective_date, today)
+                for split, stock in rows
+            ]
             results = await asyncio.gather(*tasks)
 
-        result_map = {symbol: (daily, fourh, daily_err, fourh_err) for symbol, daily, fourh, daily_err, fourh_err in results}
+        # Key by split id, not symbol, so a ticker with multiple split events in
+        # the requested window cannot accidentally reuse another event's bars.
+        result_map = {
+            split_id: (daily, fourh, daily_err, fourh_err)
+            for split_id, daily, fourh, daily_err, fourh_err in results
+        }
 
         for split, stock in rows:
-            daily, fourh, daily_err, fourh_err = result_map.get(stock.symbol, (None, [], "missing result", "missing result"))
+            daily, fourh, daily_err, fourh_err = result_map.get(
+                split.id, (None, [], "missing result", "missing result")
+            )
 
-            # Trusted daily data: purge stale legacy/Yahoo values first. If the
-            # trusted source is unavailable we leave metrics blank rather than wrong.
             db.execute(delete(DailyBar).where(
                 DailyBar.stock_id == stock.id,
                 DailyBar.trade_date >= split.effective_date,
             ))
             if daily_err or not daily:
                 _clear_metrics(split)
-                PRICE_SYNC_STATUS["errors"].append({"symbol": stock.symbol, "layer": "daily", "error": (daily_err or "no bars")[:180]})
+                PRICE_SYNC_STATUS["errors"].append({
+                    "symbol": stock.symbol,
+                    "layer": "daily",
+                    "error": (daily_err or "no bars")[:180],
+                })
             else:
                 for bar in daily:
                     db.add(DailyBar(stock_id=stock.id, **bar))
                     PRICE_SYNC_STATUS["bars_upserted"] += 1
-                db.flush()
-                refresh_split_metrics(db, split)
 
-            # 4h layer is deliberately separate and can fail without poisoning
-            # trusted daily metrics.
             db.execute(delete(FourHourBar).where(
                 FourHourBar.stock_id == stock.id,
                 FourHourBar.bar_time >= split.effective_date,
             ))
             if fourh_err:
-                PRICE_SYNC_STATUS["errors"].append({"symbol": stock.symbol, "layer": "4h", "error": fourh_err[:180]})
+                PRICE_SYNC_STATUS["errors"].append({
+                    "symbol": stock.symbol,
+                    "layer": "4h",
+                    "error": fourh_err[:180],
+                })
             else:
                 for bar in fourh:
                     db.add(FourHourBar(stock_id=stock.id, **bar))
                     PRICE_SYNC_STATUS["four_hour_bars_upserted"] += 1
+
+            # Flush both daily + intraday layers before calculating metrics. This is
+            # required because half_level now comes from the split-day intraday high.
+            db.flush()
+            if not daily_err and daily:
+                refresh_split_metrics(db, split)
 
             PRICE_SYNC_STATUS["processed"] += 1
 
