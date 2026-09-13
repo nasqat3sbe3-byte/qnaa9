@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models import Split, Stock, BorrowSnapshot, FourHourBar, DailyBar
+from ..providers.ibkr import fetch_borrow_snapshot
 from ..services.sync_splits import sync_splits
 from ..services.sync_prices import PRICE_SYNC_STATUS, run_price_sync
 
@@ -79,6 +80,65 @@ def sync_prices_status():
     return PRICE_SYNC_STATUS
 
 
+@router.get("/sync/borrow/{symbol}")
+async def sync_borrow_symbol(symbol: str, db: Session = Depends(get_db)):
+    symbol = symbol.upper().strip()
+    stock = db.scalar(select(Stock).where(Stock.symbol == symbol))
+    if not stock:
+        raise HTTPException(status_code=404, detail="symbol not found")
+
+    snapshot = await fetch_borrow_snapshot(symbol)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="borrow data not found")
+
+    row = BorrowSnapshot(
+        stock_id=stock.id,
+        ts=snapshot["reported_at"],
+        available_shares=snapshot["available_shares"],
+        fee_rate=snapshot["fee_rate"],
+        rebate_rate=snapshot["rebate_rate"],
+        source=snapshot["source"],
+    )
+    db.add(row)
+    db.commit()
+    return {
+        "symbol": symbol,
+        "available": row.available_shares,
+        "ctb": row.fee_rate,
+        "fee_rate": row.fee_rate,
+        "rebate_rate": row.rebate_rate,
+        "source": row.source,
+        "timestamp": row.ts,
+        "exchange": snapshot.get("exchange"),
+    }
+
+
+@router.get("/borrow/{symbol}/history")
+def borrow_history(symbol: str, limit: int = 100, db: Session = Depends(get_db)):
+    symbol = symbol.upper().strip()
+    stock = db.scalar(select(Stock).where(Stock.symbol == symbol))
+    if not stock:
+        raise HTTPException(status_code=404, detail="symbol not found")
+    limit = max(1, min(limit, 1000))
+    rows = db.scalars(
+        select(BorrowSnapshot)
+        .where(BorrowSnapshot.stock_id == stock.id)
+        .order_by(BorrowSnapshot.ts.desc())
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "timestamp": r.ts,
+            "available": r.available_shares,
+            "ctb": r.fee_rate,
+            "fee_rate": r.fee_rate,
+            "rebate_rate": r.rebate_rate,
+            "source": r.source,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/splits")
 def splits(db: Session = Depends(get_db)):
     rows = db.execute(select(Split, Stock).join(Stock, Stock.id == Split.stock_id).where(Split.effective_date >= date(2026, 6, 1), Split.effective_date <= date(2026, 9, 30)).order_by(Split.effective_date.desc(), Stock.symbol.asc())).all()
@@ -96,6 +156,7 @@ def stock_detail(symbol: str, db: Session = Depends(get_db)):
     b = db.scalar(select(BorrowSnapshot).where(BorrowSnapshot.stock_id == s.id).order_by(BorrowSnapshot.ts.desc()).limit(1))
     payload.update({
         "available": b.available_shares if b else None,
+        "ctb": b.fee_rate if b else None,
         "fee_rate": b.fee_rate if b else None,
         "rebate_rate": b.rebate_rate if b else None,
         "borrow_source": b.source if b else None,
@@ -114,7 +175,9 @@ def hunt(db: Session = Depends(get_db)):
             "symbol": s.symbol,
             "ready_score": sp.ready_score,
             "available": b.available_shares if b else None,
+            "ctb": b.fee_rate if b else None,
             "fee_rate": b.fee_rate if b else None,
+            "rebate_rate": b.rebate_rate if b else None,
             "post_split_low": sp.post_split_low,
             "current_price": sp.current_price,
             "distance_from_low_pct": sp.distance_from_low_pct,
