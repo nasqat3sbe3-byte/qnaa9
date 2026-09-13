@@ -1,6 +1,6 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from ..models import Split, DailyBar, FourHourBar, BorrowSnapshot
+from ..models import Split, DailyBar, BorrowSnapshot
 from .scoring import compute_score
 
 
@@ -17,45 +17,33 @@ def refresh_split_metrics(db: Session, split: Split):
         return
 
     split.status = "active"
+    split.post_split_open = bars[0].open
 
-    # First actual trading session after the reverse split.
-    split_day = bars[0]
-    split.post_split_open = split_day.open
+    # Dynamic extremes from the split onward. Every sync recalculates them from
+    # the complete trusted post-split history, so a new high/low updates automatically.
+    post_split_high = max(b.high for b in bars)
+    post_split_low = min(b.low for b in bars)
+    split.post_split_high = post_split_high
+    split.post_split_low = post_split_low
 
-    # Highest trusted daily price seen after the split (all sessions).
-    split.post_split_high = max(b.high for b in bars)
-
-    # Post-split low/current metrics.
-    new_low = min(b.low for b in bars)
-    split.post_split_low = new_low
     split.current_price = bars[-1].close
-    split.distance_from_low_pct = ((split.current_price / new_low) - 1) * 100 if new_low else None
+    split.distance_from_low_pct = (
+        ((split.current_price / post_split_low) - 1) * 100
+        if post_split_low else None
+    )
 
-    # Qanas half-level rule:
-    # Reference = highest *intraday* price reached on the split effective date,
-    # including pre-market/after-hours. Do not fall back to the daily candle high;
-    # if intraday data is unavailable, leave this signal unknown instead of wrong.
-    intraday_split_day = db.scalars(
-        select(FourHourBar)
-        .where(FourHourBar.stock_id == split.stock_id)
-        .order_by(FourHourBar.bar_time.asc())
-    ).all()
-    intraday_split_day = [
-        b for b in intraday_split_day
-        if b.bar_time.date() == split.effective_date
-    ]
-    split_day_intraday_high = max((b.high for b in intraday_split_day), default=None)
-    split.half_level = split_day_intraday_high / 2 if split_day_intraday_high else None
+    # Qanas half-level rule: always use the highest price reached since the split.
+    # Example: the stock later makes a new high at 7 => half-level becomes 3.50.
+    split.half_level = post_split_high / 2 if post_split_high else None
 
-    # Once the intraday reference exists, consider the half level reached if any
-    # trusted post-split daily low traded at or below it.
+    # Re-evaluate against the full post-split history whenever the high changes.
     split.half_level_reached = bool(
         split.half_level is not None
         and any(b.low <= split.half_level for b in bars)
     )
 
-    # Stability resets naturally whenever a newer all-time post-split low appears.
-    low_index = max(i for i, b in enumerate(bars) if b.low == new_low)
+    # Stability resets whenever a newer all-time post-split low appears.
+    low_index = max(i for i, b in enumerate(bars) if b.low == post_split_low)
     split.stability_sessions = min(4, max(0, len(bars) - 1 - low_index))
     split.last_low_date = bars[low_index].trade_date
 
