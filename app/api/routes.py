@@ -4,7 +4,7 @@ from datetime import date, datetime
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
@@ -60,7 +60,20 @@ async def run_borrow_sync():
     try:
         run=SyncRun(kind="borrow",running=True); db.add(run); db.commit(); db.refresh(run)
         await sync_splits(db,start=RANGE_START,end=RANGE_END)
-        today=date.today(); rows=db.execute(select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END,Split.effective_date<=today).order_by(Stock.symbol.asc())).all()
+        today=date.today()
+
+        missing_prices = db.scalar(
+            select(func.count(Split.id)).where(
+                Split.effective_date>=RANGE_START,
+                Split.effective_date<=RANGE_END,
+                Split.effective_date<=today,
+                Split.post_split_open.is_(None),
+            )
+        ) or 0
+        if missing_prices and not PRICE_SYNC_STATUS["running"]:
+            asyncio.create_task(run_price_sync(start=RANGE_START,end=RANGE_END))
+
+        rows=db.execute(select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END,Split.effective_date<=today).order_by(Stock.symbol.asc())).all()
         targets={stock.symbol:(sp,stock) for sp,stock in rows}
         BORROW_SYNC_STATUS["total"]=len(targets); run.total=len(targets); db.commit()
         sem=asyncio.Semaphore(BORROW_SYNC_CONCURRENCY); headers={"User-Agent":"Mozilla/5.0 QanasDataEngine/1.0"}
@@ -140,4 +153,5 @@ def stock_detail(symbol:str,db:Session=Depends(get_db)):
     sp,s=row; return _split_payload(db,sp,s)
 @router.get("/hunt")
 def hunt(db:Session=Depends(get_db)):
-    rows=db.execute(select(Split,Stock).join(Stock).where(Split.status=="active",Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END).order_by(Split.ready_score.desc().nullslast(),Stock.symbol.asc())).all(); return [_split_payload(db,sp,s) for sp,s in rows]
+    today=date.today()
+    rows=db.execute(select(Split,Stock).join(Stock).where(Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END,Split.effective_date<=today).order_by(Split.ready_score.desc().nullslast(),Split.effective_date.desc(),Stock.symbol.asc())).all(); return [_split_payload(db,sp,s) for sp,s in rows]
