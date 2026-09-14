@@ -8,41 +8,67 @@ from bs4 import BeautifulSoup
 from dateutil import parser as dtparser
 
 
-# US listings in the reverse-split universe are mainly on these venues.
-# OTC is included because some post-split names move off the major exchanges.
 _EXCHANGES = ("nasdaq", "nyse", "amex", "otc")
-
-# ChartExchange's public wording has changed slightly over time, so keep the
-# parser tolerant of singular/plural shares and negative fee values.
 _LATEST_RE = re.compile(
     r"As of\s+(.+?),\s+there\s+(?:were|was)\s+([\d,]+)\s+shares?\s+available\s+with\s+a\s+fee\s+of\s+(-?[\d.]+)%",
     re.IGNORECASE,
 )
+_IB_FEE_RE = re.compile(r"Borrow fee\s+(-?[\d.]+)%", re.IGNORECASE)
+_IB_AVAILABLE_RE = re.compile(r"Shares available\s+([\d.]+)\s*([KMB]?)", re.IGNORECASE)
+_IB_UPDATED_RE = re.compile(r"Updated\s+(.+?)(?:\s+·|\s+change shown|$)", re.IGNORECASE)
 
 
-def _parse_snapshot(text: str):
+def _parse_dt(raw: str):
+    try:
+        value = dtparser.parse(raw)
+        if value.tzinfo is not None:
+            value = value.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+        return value
+    except Exception:
+        return datetime.utcnow()
+
+
+def _parse_chart_exchange(text: str):
     m = _LATEST_RE.search(text)
     if not m:
         return None
-
     reported_raw, available_raw, fee_raw = m.groups()
-    try:
-        reported_at = dtparser.parse(reported_raw)
-        if reported_at.tzinfo is not None:
-            reported_at = reported_at.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
-    except Exception:
-        reported_at = datetime.utcnow()
-
     return {
         "available_shares": float(available_raw.replace(",", "")),
         "fee_rate": float(fee_raw),
         "rebate_rate": None,
-        "reported_at": reported_at,
+        "reported_at": _parse_dt(reported_raw),
+    }
+
+
+def _scaled_number(value: str, suffix: str):
+    n = float(value)
+    suffix = suffix.upper()
+    if suffix == "K":
+        n *= 1_000
+    elif suffix == "M":
+        n *= 1_000_000
+    elif suffix == "B":
+        n *= 1_000_000_000
+    return n
+
+
+def _parse_iborrowdesk(text: str):
+    fee = _IB_FEE_RE.search(text)
+    available = _IB_AVAILABLE_RE.search(text)
+    if not fee or not available:
+        return None
+
+    updated = _IB_UPDATED_RE.search(text)
+    return {
+        "available_shares": _scaled_number(available.group(1), available.group(2)),
+        "fee_rate": float(fee.group(1)),
+        "rebate_rate": None,
+        "reported_at": _parse_dt(updated.group(1)) if updated else datetime.utcnow(),
     }
 
 
 async def _get_with_retry(client: httpx.AsyncClient, url: str):
-    """Small retry/backoff for transient 429/5xx responses from the public page."""
     for attempt in range(4):
         try:
             r = await client.get(url)
@@ -57,12 +83,13 @@ async def _get_with_retry(client: httpx.AsyncClient, url: str):
 
 
 async def fetch_borrow_snapshot(symbol: str, client: httpx.AsyncClient | None = None):
-    """Fetch latest public IBKR-derived borrow data from ChartExchange.
+    """Fetch current IBKR-derived Available + CTB from public sources.
 
-    Returns current available shares + borrow fee/CTB. The public page does not
-    expose a live numeric rebate rate, so rebate_rate deliberately remains None.
+    ChartExchange is primary; IBorrowDesk is fallback. Rebate remains None until
+    a source exposes an actual live numeric rebate value.
     """
-    symbol = symbol.lower().strip()
+    clean_symbol = symbol.upper().strip()
+    symbol_lower = clean_symbol.lower()
     own_client = client is None
     if own_client:
         client = httpx.AsyncClient(
@@ -77,22 +104,27 @@ async def fetch_borrow_snapshot(symbol: str, client: httpx.AsyncClient | None = 
         )
 
     try:
+        # Primary source: ChartExchange / IBKR.
         for exchange in _EXCHANGES:
-            url = f"https://chartexchange.com/symbol/{exchange}-{symbol}/borrow-fee/"
+            url = f"https://chartexchange.com/symbol/{exchange}-{symbol_lower}/borrow-fee/"
             r = await _get_with_retry(client, url)
             if r is None:
                 continue
-
             text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True)
-            parsed = _parse_snapshot(text)
-            if not parsed:
-                continue
+            parsed = _parse_chart_exchange(text)
+            if parsed:
+                parsed.update({"source": "ChartExchange/IBKR", "exchange": exchange})
+                return parsed
 
-            parsed.update({
-                "source": "ChartExchange/IBKR",
-                "exchange": exchange,
-            })
-            return parsed
+        # Fallback source: IBorrowDesk, also derived from IBKR stock-loan data.
+        url = f"https://www.iborrowdesk.com/report/{clean_symbol}"
+        r = await _get_with_retry(client, url)
+        if r is not None:
+            text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True)
+            parsed = _parse_iborrowdesk(text)
+            if parsed:
+                parsed.update({"source": "IBorrowDesk/IBKR", "exchange": None})
+                return parsed
 
         return None
     finally:
