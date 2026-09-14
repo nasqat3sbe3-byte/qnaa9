@@ -56,20 +56,27 @@ async def run_borrow_sync():
     try:
         run=SyncRun(kind="borrow",running=True); db.add(run); db.commit(); db.refresh(run)
         today=date.today(); rows=db.execute(select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Split.effective_date>=date(2026,6,1),Split.effective_date<=date(2026,9,30),Split.effective_date<=today).order_by(Stock.symbol.asc())).all()
-        by_symbol={stock.symbol:(sp,stock) for sp,stock in rows}; targets=list(by_symbol.items())
+        targets={stock.symbol:(sp,stock) for sp,stock in rows}
         BORROW_SYNC_STATUS["total"]=len(targets); run.total=len(targets); db.commit()
         sem=asyncio.Semaphore(6); headers={"User-Agent":"Mozilla/5.0 QanasDataEngine/1.0"}
-        async with httpx.AsyncClient(timeout=20,follow_redirects=True,headers=headers) as client:
-            results=await asyncio.gather(*[_borrow_fetch_one(client,sem,symbol) for symbol,_ in targets])
-        result_map={symbol:(snap,err) for symbol,snap,err in results}
-        for symbol,(sp,stock) in targets:
-            snap,err=result_map.get(symbol,(None,"missing result")); BORROW_SYNC_STATUS["processed"]+=1; run.processed+=1
-            if err: BORROW_SYNC_STATUS["errors"].append({"symbol":symbol,"error":err[:180]}); continue
-            if not snap: BORROW_SYNC_STATUS["not_found"]+=1; run.not_found+=1; continue
-            latest=_latest_borrow(db,stock.id); same=bool(latest and latest.ts==snap["reported_at"] and latest.available_shares==snap["available_shares"] and latest.fee_rate==snap["fee_rate"])
-            if not same:
-                db.add(BorrowSnapshot(stock_id=stock.id,ts=snap["reported_at"],available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"])); db.flush(); BORROW_SYNC_STATUS["saved"]+=1; run.saved+=1
-            refresh_split_metrics(db,sp)
+        async with httpx.AsyncClient(timeout=30,follow_redirects=True,headers=headers) as client:
+            tasks=[asyncio.create_task(_borrow_fetch_one(client,sem,symbol)) for symbol in targets]
+            for task in asyncio.as_completed(tasks):
+                symbol,snap,err=await task
+                sp,stock=targets[symbol]
+                BORROW_SYNC_STATUS["processed"]+=1; run.processed+=1
+                if err:
+                    BORROW_SYNC_STATUS["errors"].append({"symbol":symbol,"error":err[:180]})
+                elif not snap:
+                    BORROW_SYNC_STATUS["not_found"]+=1; run.not_found+=1
+                else:
+                    latest=_latest_borrow(db,stock.id)
+                    same=bool(latest and latest.ts==snap["reported_at"] and latest.available_shares==snap["available_shares"] and latest.fee_rate==snap["fee_rate"])
+                    if not same:
+                        db.add(BorrowSnapshot(stock_id=stock.id,ts=snap["reported_at"],available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"])); db.flush(); BORROW_SYNC_STATUS["saved"]+=1; run.saved+=1
+                    refresh_split_metrics(db,sp)
+                run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:100])
+                db.commit()
         run.running=False; run.finished_at=datetime.utcnow(); run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:100]); db.commit(); BORROW_SYNC_STATUS["last_finished"]=run.finished_at.isoformat()
     except Exception as exc:
         db.rollback(); BORROW_SYNC_STATUS["errors"].append({"symbol":"SYSTEM","error":str(exc)[:300]})
