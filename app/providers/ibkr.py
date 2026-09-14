@@ -18,9 +18,9 @@ _IB_FEE_RE = re.compile(r"Borrow fee\s+(-?[\d.]+)%", re.IGNORECASE)
 _IB_AVAILABLE_RE = re.compile(r"Shares available\s+([\d.]+)\s*([KMB]?)", re.IGNORECASE)
 _IB_UPDATED_RE = re.compile(r"Updated\s+(.+?)(?:\s+·|\s+change shown|$)", re.IGNORECASE)
 
-# Jina Reader has a free no-key rate limit of about 20 requests/minute.
-# Space fallback calls so bulk syncs do not immediately hit 429s.
-_JINA_LOCK = asyncio.Lock()
+# Create asyncio primitives lazily inside a running event loop. This avoids
+# startup/runtime compatibility problems on newer Python versions used by Render.
+_JINA_LOCK = None
 _JINA_LAST_CALL = 0.0
 _JINA_MIN_INTERVAL = 3.2
 
@@ -90,12 +90,11 @@ async def _get_with_retry(client: httpx.AsyncClient, url: str):
 
 
 async def _fetch_via_jina(client: httpx.AsyncClient, target_url: str):
-    """Read a public page through Jina Reader's cache/browser layer.
+    """Read a public page through Jina Reader as a last-resort cache layer."""
+    global _JINA_LOCK, _JINA_LAST_CALL
 
-    This is only a fallback for pages that return anti-bot interstitials to
-    Render. No API key is required for basic usage, so calls are rate-limited.
-    """
-    global _JINA_LAST_CALL
+    if _JINA_LOCK is None:
+        _JINA_LOCK = asyncio.Lock()
 
     async with _JINA_LOCK:
         wait_for = _JINA_MIN_INTERVAL - (time.monotonic() - _JINA_LAST_CALL)
@@ -106,10 +105,7 @@ async def _fetch_via_jina(client: httpx.AsyncClient, target_url: str):
         try:
             r = await client.get(
                 reader_url,
-                headers={
-                    "Accept": "text/plain",
-                    "X-Timeout": "20",
-                },
+                headers={"Accept": "text/plain", "X-Timeout": "20"},
                 timeout=30,
             )
             _JINA_LAST_CALL = time.monotonic()
@@ -126,7 +122,7 @@ async def fetch_borrow_snapshot(symbol: str, client: httpx.AsyncClient | None = 
     Order:
     1) ChartExchange direct.
     2) IBorrowDesk direct.
-    3) Cached/browser-rendered ChartExchange through Jina Reader.
+    3) Cached ChartExchange through Jina Reader.
 
     Rebate stays None until a source exposes a real live numeric rebate value.
     """
@@ -146,7 +142,6 @@ async def fetch_borrow_snapshot(symbol: str, client: httpx.AsyncClient | None = 
         )
 
     try:
-        # Primary source: ChartExchange / IBKR.
         target_urls = []
         for exchange in _EXCHANGES:
             url = f"https://chartexchange.com/symbol/{exchange}-{symbol_lower}/borrow-fee/"
@@ -160,7 +155,6 @@ async def fetch_borrow_snapshot(symbol: str, client: httpx.AsyncClient | None = 
                 parsed.update({"source": "ChartExchange/IBKR", "exchange": exchange})
                 return parsed
 
-        # Secondary direct source: IBorrowDesk.
         url = f"https://www.iborrowdesk.com/report/{clean_symbol}"
         r = await _get_with_retry(client, url)
         if r is not None:
@@ -170,8 +164,6 @@ async def fetch_borrow_snapshot(symbol: str, client: httpx.AsyncClient | None = 
                 parsed.update({"source": "IBorrowDesk/IBKR", "exchange": None})
                 return parsed
 
-        # Final fallback: use Jina Reader as a cached/browser-rendered layer.
-        # Stop as soon as an exchange URL yields a valid ChartExchange reading.
         for exchange, target_url in target_urls:
             text = await _fetch_via_jina(client, target_url)
             if not text:
