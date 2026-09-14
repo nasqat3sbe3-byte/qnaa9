@@ -16,6 +16,8 @@ from ..services.sync_splits import sync_splits
 
 router = APIRouter()
 
+RANGE_START = date(2026, 5, 1)
+RANGE_END = date(2026, 9, 30)
 BORROW_SYNC_STATUS = {"running": False, "processed": 0, "total": 0, "saved": 0, "not_found": 0, "errors": [], "last_finished": None}
 BORROW_SYNC_CONCURRENCY = 32
 
@@ -45,10 +47,11 @@ async def _borrow_fetch_one(client,sem,symbol):
         except Exception as exc:return symbol,None,str(exc)
 
 def _run_payload(r):
-    if not r:return {"running":False,"processed":0,"total":0,"saved":0,"not_found":0,"errors":[],"last_finished":None}
+    if not r:return {"running":False,"processed":0,"total":0,"saved":0,"not_found":0,"errors":[],"missing_symbols":[],"last_finished":None}
     try: errors=json.loads(r.errors_json or "[]")
     except: errors=[]
-    return {"running":r.running,"processed":r.processed,"total":r.total,"saved":r.saved,"not_found":r.not_found,"errors":errors,"started_at":r.started_at,"last_finished":r.finished_at}
+    missing=[e.get("symbol") for e in errors if isinstance(e,dict) and e.get("error")=="borrow data not found" and e.get("symbol")]
+    return {"running":r.running,"processed":r.processed,"total":r.total,"saved":r.saved,"not_found":r.not_found,"errors":errors,"missing_symbols":missing,"started_at":r.started_at,"last_finished":r.finished_at}
 
 async def run_borrow_sync():
     if BORROW_SYNC_STATUS["running"]: return BORROW_SYNC_STATUS
@@ -56,7 +59,7 @@ async def run_borrow_sync():
     db=SessionLocal(); run=None
     try:
         run=SyncRun(kind="borrow",running=True); db.add(run); db.commit(); db.refresh(run)
-        today=date.today(); rows=db.execute(select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Split.effective_date>=date(2026,6,1),Split.effective_date<=date(2026,9,30),Split.effective_date<=today).order_by(Stock.symbol.asc())).all()
+        today=date.today(); rows=db.execute(select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END,Split.effective_date<=today).order_by(Stock.symbol.asc())).all()
         targets={stock.symbol:(sp,stock) for sp,stock in rows}
         BORROW_SYNC_STATUS["total"]=len(targets); run.total=len(targets); db.commit()
         sem=asyncio.Semaphore(BORROW_SYNC_CONCURRENCY); headers={"User-Agent":"Mozilla/5.0 QanasDataEngine/1.0"}
@@ -71,15 +74,16 @@ async def run_borrow_sync():
                     BORROW_SYNC_STATUS["errors"].append({"symbol":symbol,"error":err[:180]})
                 elif not snap:
                     BORROW_SYNC_STATUS["not_found"]+=1; run.not_found+=1
+                    BORROW_SYNC_STATUS["errors"].append({"symbol":symbol,"error":"borrow data not found"})
                 else:
                     latest=_latest_borrow(db,stock.id)
                     same=bool(latest and latest.ts==snap["reported_at"] and latest.available_shares==snap["available_shares"] and latest.fee_rate==snap["fee_rate"])
                     if not same:
                         db.add(BorrowSnapshot(stock_id=stock.id,ts=snap["reported_at"],available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"])); db.flush(); BORROW_SYNC_STATUS["saved"]+=1; run.saved+=1
                     refresh_split_metrics(db,sp)
-                run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:100])
+                run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:200])
                 db.commit()
-        run.running=False; run.finished_at=datetime.utcnow(); run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:100]); db.commit(); BORROW_SYNC_STATUS["last_finished"]=run.finished_at.isoformat()
+        run.running=False; run.finished_at=datetime.utcnow(); run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:200]); db.commit(); BORROW_SYNC_STATUS["last_finished"]=run.finished_at.isoformat()
     except Exception as exc:
         db.rollback(); BORROW_SYNC_STATUS["errors"].append({"symbol":"SYSTEM","error":str(exc)[:300]})
         if run:
@@ -92,10 +96,10 @@ async def run_borrow_sync():
 @router.get("/health")
 def health(): return {"ok":True}
 @router.get("/sync/splits")
-async def sync_splits_now(db:Session=Depends(get_db)): return await sync_splits(db,start=date(2026,6,1),end=date(2026,9,30))
+async def sync_splits_now(db:Session=Depends(get_db)): return await sync_splits(db,start=RANGE_START,end=RANGE_END)
 @router.get("/sync/prices")
 async def sync_prices_now():
-    if not PRICE_SYNC_STATUS["running"]: asyncio.create_task(run_price_sync())
+    if not PRICE_SYNC_STATUS["running"]: asyncio.create_task(run_price_sync(start=RANGE_START,end=RANGE_END))
     return {"started":True,**PRICE_SYNC_STATUS}
 @router.get("/sync/prices/status")
 def sync_prices_status(): return PRICE_SYNC_STATUS
@@ -127,7 +131,7 @@ def borrow_history(symbol:str,limit:int=100,db:Session=Depends(get_db)):
     return [{"timestamp":r.ts,"available":r.available_shares,"ctb":r.fee_rate,"fee_rate":r.fee_rate,"rebate_rate":r.rebate_rate,"source":r.source} for r in rows]
 @router.get("/splits")
 def splits(db:Session=Depends(get_db)):
-    rows=db.execute(select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Split.effective_date>=date(2026,6,1),Split.effective_date<=date(2026,9,30)).order_by(Split.effective_date.desc(),Stock.symbol.asc())).all(); return [_split_payload(db,sp,s) for sp,s in rows]
+    rows=db.execute(select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END).order_by(Split.effective_date.desc(),Stock.symbol.asc())).all(); return [_split_payload(db,sp,s) for sp,s in rows]
 @router.get("/stock/{symbol}")
 def stock_detail(symbol:str,db:Session=Depends(get_db)):
     symbol=symbol.upper().strip(); row=db.execute(select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Stock.symbol==symbol).order_by(Split.effective_date.desc()).limit(1)).first()
@@ -135,4 +139,4 @@ def stock_detail(symbol:str,db:Session=Depends(get_db)):
     sp,s=row; return _split_payload(db,sp,s)
 @router.get("/hunt")
 def hunt(db:Session=Depends(get_db)):
-    rows=db.execute(select(Split,Stock).join(Stock).where(Split.status=="active").order_by(Split.ready_score.desc().nullslast(),Stock.symbol.asc())).all(); return [_split_payload(db,sp,s) for sp,s in rows]
+    rows=db.execute(select(Split,Stock).join(Stock).where(Split.status=="active",Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END).order_by(Split.ready_score.desc().nullslast(),Stock.symbol.asc())).all(); return [_split_payload(db,sp,s) for sp,s in rows]
