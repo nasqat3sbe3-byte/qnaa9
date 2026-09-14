@@ -17,6 +17,7 @@ from ..services.sync_splits import sync_splits
 router = APIRouter()
 
 BORROW_SYNC_STATUS = {"running": False, "processed": 0, "total": 0, "saved": 0, "not_found": 0, "errors": [], "last_finished": None}
+BORROW_SYNC_CONCURRENCY = 12
 
 def get_db():
     db = SessionLocal()
@@ -58,8 +59,9 @@ async def run_borrow_sync():
         today=date.today(); rows=db.execute(select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Split.effective_date>=date(2026,6,1),Split.effective_date<=date(2026,9,30),Split.effective_date<=today).order_by(Stock.symbol.asc())).all()
         targets={stock.symbol:(sp,stock) for sp,stock in rows}
         BORROW_SYNC_STATUS["total"]=len(targets); run.total=len(targets); db.commit()
-        sem=asyncio.Semaphore(6); headers={"User-Agent":"Mozilla/5.0 QanasDataEngine/1.0"}
-        async with httpx.AsyncClient(timeout=30,follow_redirects=True,headers=headers) as client:
+        sem=asyncio.Semaphore(BORROW_SYNC_CONCURRENCY); headers={"User-Agent":"Mozilla/5.0 QanasDataEngine/1.0"}
+        limits=httpx.Limits(max_connections=24,max_keepalive_connections=16)
+        async with httpx.AsyncClient(timeout=30,follow_redirects=True,headers=headers,limits=limits) as client:
             tasks=[asyncio.create_task(_borrow_fetch_one(client,sem,symbol)) for symbol in targets]
             for task in asyncio.as_completed(tasks):
                 symbol,snap,err=await task
