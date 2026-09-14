@@ -68,6 +68,15 @@ def _parse_iborrowdesk(text: str):
     }
 
 
+def _default_headers():
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+    }
+
+
 async def _get_with_retry(client: httpx.AsyncClient, url: str):
     for attempt in range(4):
         try:
@@ -82,6 +91,53 @@ async def _get_with_retry(client: httpx.AsyncClient, url: str):
     return None
 
 
+async def diagnose_borrow_sources(symbol: str):
+    """Return non-sensitive diagnostics for outbound borrow-source requests."""
+    clean_symbol = symbol.upper().strip()
+    symbol_lower = clean_symbol.lower()
+    checks = []
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=_default_headers()) as client:
+        for exchange in _EXCHANGES:
+            url = f"https://chartexchange.com/symbol/{exchange}-{symbol_lower}/borrow-fee/"
+            try:
+                r = await client.get(url)
+                text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True) if r.text else ""
+                parsed = _parse_chart_exchange(text) if r.status_code == 200 else None
+                checks.append({
+                    "source": "ChartExchange",
+                    "exchange": exchange,
+                    "status": r.status_code,
+                    "final_url": str(r.url),
+                    "content_type": r.headers.get("content-type"),
+                    "body_length": len(r.text or ""),
+                    "parser_match": bool(parsed),
+                    "cloudflare_hint": "cloudflare" in text.lower() or "just a moment" in text.lower(),
+                    "sample": text[:180],
+                })
+            except Exception as exc:
+                checks.append({"source": "ChartExchange", "exchange": exchange, "error": type(exc).__name__ + ": " + str(exc)[:140]})
+
+        url = f"https://www.iborrowdesk.com/report/{clean_symbol}"
+        try:
+            r = await client.get(url)
+            text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True) if r.text else ""
+            parsed = _parse_iborrowdesk(text) if r.status_code == 200 else None
+            checks.append({
+                "source": "IBorrowDesk",
+                "exchange": None,
+                "status": r.status_code,
+                "final_url": str(r.url),
+                "content_type": r.headers.get("content-type"),
+                "body_length": len(r.text or ""),
+                "parser_match": bool(parsed),
+                "cloudflare_hint": "cloudflare" in text.lower() or "just a moment" in text.lower(),
+                "sample": text[:180],
+            })
+        except Exception as exc:
+            checks.append({"source": "IBorrowDesk", "exchange": None, "error": type(exc).__name__ + ": " + str(exc)[:140]})
+    return {"symbol": clean_symbol, "checks": checks}
+
+
 async def fetch_borrow_snapshot(symbol: str, client: httpx.AsyncClient | None = None):
     """Fetch current IBKR-derived Available + CTB from public sources.
 
@@ -92,19 +148,9 @@ async def fetch_borrow_snapshot(symbol: str, client: httpx.AsyncClient | None = 
     symbol_lower = clean_symbol.lower()
     own_client = client is None
     if own_client:
-        client = httpx.AsyncClient(
-            timeout=30,
-            follow_redirects=True,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/153 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Cache-Control": "no-cache",
-            },
-        )
+        client = httpx.AsyncClient(timeout=30, follow_redirects=True, headers=_default_headers())
 
     try:
-        # Primary source: ChartExchange / IBKR.
         for exchange in _EXCHANGES:
             url = f"https://chartexchange.com/symbol/{exchange}-{symbol_lower}/borrow-fee/"
             r = await _get_with_retry(client, url)
@@ -116,7 +162,6 @@ async def fetch_borrow_snapshot(symbol: str, client: httpx.AsyncClient | None = 
                 parsed.update({"source": "ChartExchange/IBKR", "exchange": exchange})
                 return parsed
 
-        # Fallback source: IBorrowDesk, also derived from IBKR stock-loan data.
         url = f"https://www.iborrowdesk.com/report/{clean_symbol}"
         r = await _get_with_retry(client, url)
         if r is not None:
