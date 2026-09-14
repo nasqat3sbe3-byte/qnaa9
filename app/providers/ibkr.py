@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 import time
 from datetime import datetime
@@ -18,11 +19,18 @@ _IB_FEE_RE = re.compile(r"Borrow fee\s+(-?[\d.]+)%", re.IGNORECASE)
 _IB_AVAILABLE_RE = re.compile(r"Shares available\s+([\d.]+)\s*([KMB]?)", re.IGNORECASE)
 _IB_UPDATED_RE = re.compile(r"Updated\s+(.+?)(?:\s+·|\s+change shown|$)", re.IGNORECASE)
 
-# Create asyncio primitives lazily inside a running event loop. This avoids
-# startup/runtime compatibility problems on newer Python versions used by Render.
 _JINA_LOCK = None
 _JINA_LAST_CALL = 0.0
-_JINA_MIN_INTERVAL = 3.2
+_JINA_MIN_INTERVAL_NO_KEY = 3.2
+_JINA_MIN_INTERVAL_WITH_KEY = 0.16
+
+
+def _jina_api_key():
+    return (os.getenv("JINA_API_KEY") or "").strip()
+
+
+def _jina_min_interval():
+    return _JINA_MIN_INTERVAL_WITH_KEY if _jina_api_key() else _JINA_MIN_INTERVAL_NO_KEY
 
 
 def _parse_dt(raw: str):
@@ -40,9 +48,13 @@ def _parse_chart_exchange(text: str):
     if not m:
         return None
     reported_raw, available_raw, fee_raw = m.groups()
+    available = float(available_raw.replace(",", ""))
+    fee = float(fee_raw)
+    if available < 0 or fee < -1000 or fee > 10000:
+        return None
     return {
-        "available_shares": float(available_raw.replace(",", "")),
-        "fee_rate": float(fee_raw),
+        "available_shares": available,
+        "fee_rate": fee,
         "rebate_rate": None,
         "reported_at": _parse_dt(reported_raw),
     }
@@ -66,10 +78,15 @@ def _parse_iborrowdesk(text: str):
     if not fee or not available:
         return None
 
+    available_value = _scaled_number(available.group(1), available.group(2))
+    fee_value = float(fee.group(1))
+    if available_value < 0 or fee_value < -1000 or fee_value > 10000:
+        return None
+
     updated = _IB_UPDATED_RE.search(text)
     return {
-        "available_shares": _scaled_number(available.group(1), available.group(2)),
-        "fee_rate": float(fee.group(1)),
+        "available_shares": available_value,
+        "fee_rate": fee_value,
         "rebate_rate": None,
         "reported_at": _parse_dt(updated.group(1)) if updated else datetime.utcnow(),
     }
@@ -90,29 +107,33 @@ async def _get_with_retry(client: httpx.AsyncClient, url: str):
 
 
 async def _fetch_via_jina(client: httpx.AsyncClient, target_url: str):
-    """Read a public page through Jina Reader as a last-resort cache layer."""
     global _JINA_LOCK, _JINA_LAST_CALL
 
     if _JINA_LOCK is None:
         _JINA_LOCK = asyncio.Lock()
 
     async with _JINA_LOCK:
-        wait_for = _JINA_MIN_INTERVAL - (time.monotonic() - _JINA_LAST_CALL)
+        wait_for = _jina_min_interval() - (time.monotonic() - _JINA_LAST_CALL)
         if wait_for > 0:
             await asyncio.sleep(wait_for)
 
+        headers = {"Accept": "text/plain", "X-Timeout": "20"}
+        key = _jina_api_key()
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+
         reader_url = f"https://r.jina.ai/{target_url}"
-        try:
-            r = await client.get(
-                reader_url,
-                headers={"Accept": "text/plain", "X-Timeout": "20"},
-                timeout=30,
-            )
-            _JINA_LAST_CALL = time.monotonic()
-            if r.status_code == 200:
-                return r.text
-        except (httpx.TimeoutException, httpx.TransportError):
-            _JINA_LAST_CALL = time.monotonic()
+        for attempt in range(3):
+            try:
+                r = await client.get(reader_url, headers=headers, timeout=30)
+                _JINA_LAST_CALL = time.monotonic()
+                if r.status_code == 200:
+                    return r.text
+                if r.status_code not in (408, 425, 429, 500, 502, 503, 504):
+                    return None
+            except (httpx.TimeoutException, httpx.TransportError):
+                _JINA_LAST_CALL = time.monotonic()
+            await asyncio.sleep(1.0 + attempt)
         return None
 
 
@@ -122,9 +143,11 @@ async def fetch_borrow_snapshot(symbol: str, client: httpx.AsyncClient | None = 
     Order:
     1) ChartExchange direct.
     2) IBorrowDesk direct.
-    3) Cached ChartExchange through Jina Reader.
+    3) ChartExchange through Jina Reader.
 
-    Rebate stays None until a source exposes a real live numeric rebate value.
+    If JINA_API_KEY is configured, the official authenticated Reader path uses
+    a much faster conservative request interval. Rebate stays None until a
+    trusted source exposes a real numeric rebate value.
     """
     clean_symbol = symbol.upper().strip()
     symbol_lower = clean_symbol.lower()
