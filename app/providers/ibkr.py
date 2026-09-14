@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,12 @@ _LATEST_RE = re.compile(
 _IB_FEE_RE = re.compile(r"Borrow fee\s+(-?[\d.]+)%", re.IGNORECASE)
 _IB_AVAILABLE_RE = re.compile(r"Shares available\s+([\d.]+)\s*([KMB]?)", re.IGNORECASE)
 _IB_UPDATED_RE = re.compile(r"Updated\s+(.+?)(?:\s+·|\s+change shown|$)", re.IGNORECASE)
+
+# Jina Reader has a free no-key rate limit of about 20 requests/minute.
+# Space fallback calls so bulk syncs do not immediately hit 429s.
+_JINA_LOCK = asyncio.Lock()
+_JINA_LAST_CALL = 0.0
+_JINA_MIN_INTERVAL = 3.2
 
 
 def _parse_dt(raw: str):
@@ -68,15 +75,6 @@ def _parse_iborrowdesk(text: str):
     }
 
 
-def _default_headers():
-    return {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "no-cache",
-    }
-
-
 async def _get_with_retry(client: httpx.AsyncClient, url: str):
     for attempt in range(4):
         try:
@@ -91,68 +89,68 @@ async def _get_with_retry(client: httpx.AsyncClient, url: str):
     return None
 
 
-async def diagnose_borrow_sources(symbol: str):
-    """Return non-sensitive diagnostics for outbound borrow-source requests."""
-    clean_symbol = symbol.upper().strip()
-    symbol_lower = clean_symbol.lower()
-    checks = []
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=_default_headers()) as client:
-        for exchange in _EXCHANGES:
-            url = f"https://chartexchange.com/symbol/{exchange}-{symbol_lower}/borrow-fee/"
-            try:
-                r = await client.get(url)
-                text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True) if r.text else ""
-                parsed = _parse_chart_exchange(text) if r.status_code == 200 else None
-                checks.append({
-                    "source": "ChartExchange",
-                    "exchange": exchange,
-                    "status": r.status_code,
-                    "final_url": str(r.url),
-                    "content_type": r.headers.get("content-type"),
-                    "body_length": len(r.text or ""),
-                    "parser_match": bool(parsed),
-                    "cloudflare_hint": "cloudflare" in text.lower() or "just a moment" in text.lower(),
-                    "sample": text[:180],
-                })
-            except Exception as exc:
-                checks.append({"source": "ChartExchange", "exchange": exchange, "error": type(exc).__name__ + ": " + str(exc)[:140]})
+async def _fetch_via_jina(client: httpx.AsyncClient, target_url: str):
+    """Read a public page through Jina Reader's cache/browser layer.
 
-        url = f"https://www.iborrowdesk.com/report/{clean_symbol}"
+    This is only a fallback for pages that return anti-bot interstitials to
+    Render. No API key is required for basic usage, so calls are rate-limited.
+    """
+    global _JINA_LAST_CALL
+
+    async with _JINA_LOCK:
+        wait_for = _JINA_MIN_INTERVAL - (time.monotonic() - _JINA_LAST_CALL)
+        if wait_for > 0:
+            await asyncio.sleep(wait_for)
+
+        reader_url = f"https://r.jina.ai/{target_url}"
         try:
-            r = await client.get(url)
-            text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True) if r.text else ""
-            parsed = _parse_iborrowdesk(text) if r.status_code == 200 else None
-            checks.append({
-                "source": "IBorrowDesk",
-                "exchange": None,
-                "status": r.status_code,
-                "final_url": str(r.url),
-                "content_type": r.headers.get("content-type"),
-                "body_length": len(r.text or ""),
-                "parser_match": bool(parsed),
-                "cloudflare_hint": "cloudflare" in text.lower() or "just a moment" in text.lower(),
-                "sample": text[:180],
-            })
-        except Exception as exc:
-            checks.append({"source": "IBorrowDesk", "exchange": None, "error": type(exc).__name__ + ": " + str(exc)[:140]})
-    return {"symbol": clean_symbol, "checks": checks}
+            r = await client.get(
+                reader_url,
+                headers={
+                    "Accept": "text/plain",
+                    "X-Timeout": "20",
+                },
+                timeout=30,
+            )
+            _JINA_LAST_CALL = time.monotonic()
+            if r.status_code == 200:
+                return r.text
+        except (httpx.TimeoutException, httpx.TransportError):
+            _JINA_LAST_CALL = time.monotonic()
+        return None
 
 
 async def fetch_borrow_snapshot(symbol: str, client: httpx.AsyncClient | None = None):
-    """Fetch current IBKR-derived Available + CTB from public sources.
+    """Fetch current Available + CTB from public IBKR-derived sources.
 
-    ChartExchange is primary; IBorrowDesk is fallback. Rebate remains None until
-    a source exposes an actual live numeric rebate value.
+    Order:
+    1) ChartExchange direct.
+    2) IBorrowDesk direct.
+    3) Cached/browser-rendered ChartExchange through Jina Reader.
+
+    Rebate stays None until a source exposes a real live numeric rebate value.
     """
     clean_symbol = symbol.upper().strip()
     symbol_lower = clean_symbol.lower()
     own_client = client is None
     if own_client:
-        client = httpx.AsyncClient(timeout=30, follow_redirects=True, headers=_default_headers())
+        client = httpx.AsyncClient(
+            timeout=30,
+            follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/153 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Cache-Control": "no-cache",
+            },
+        )
 
     try:
+        # Primary source: ChartExchange / IBKR.
+        target_urls = []
         for exchange in _EXCHANGES:
             url = f"https://chartexchange.com/symbol/{exchange}-{symbol_lower}/borrow-fee/"
+            target_urls.append((exchange, url))
             r = await _get_with_retry(client, url)
             if r is None:
                 continue
@@ -162,6 +160,7 @@ async def fetch_borrow_snapshot(symbol: str, client: httpx.AsyncClient | None = 
                 parsed.update({"source": "ChartExchange/IBKR", "exchange": exchange})
                 return parsed
 
+        # Secondary direct source: IBorrowDesk.
         url = f"https://www.iborrowdesk.com/report/{clean_symbol}"
         r = await _get_with_retry(client, url)
         if r is not None:
@@ -169,6 +168,17 @@ async def fetch_borrow_snapshot(symbol: str, client: httpx.AsyncClient | None = 
             parsed = _parse_iborrowdesk(text)
             if parsed:
                 parsed.update({"source": "IBorrowDesk/IBKR", "exchange": None})
+                return parsed
+
+        # Final fallback: use Jina Reader as a cached/browser-rendered layer.
+        # Stop as soon as an exchange URL yields a valid ChartExchange reading.
+        for exchange, target_url in target_urls:
+            text = await _fetch_via_jina(client, target_url)
+            if not text:
+                continue
+            parsed = _parse_chart_exchange(text)
+            if parsed:
+                parsed.update({"source": "JinaCache/ChartExchange/IBKR", "exchange": exchange})
                 return parsed
 
         return None
