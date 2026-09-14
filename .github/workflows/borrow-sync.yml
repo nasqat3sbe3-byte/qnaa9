@@ -7,12 +7,12 @@ on:
 
 concurrency:
   group: qanas-borrow-sync
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Start borrow sync
@@ -24,7 +24,7 @@ jobs:
         run: |
           sleep 10
 
-          for i in {1..36}; do
+          for i in {1..50}; do
             OUT=$(curl --fail --retry 3 --max-time 60 \
               https://qnaa9.onrender.com/api/sync/borrow/status)
 
