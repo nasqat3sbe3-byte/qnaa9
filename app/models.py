@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from sqlalchemy import String, Date, DateTime, Float, Integer, Boolean, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Date, DateTime, Float, Integer, Boolean, ForeignKey, UniqueConstraint, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
 
@@ -66,3 +66,16 @@ class BorrowSnapshot(Base):
     fee_rate: Mapped[float | None] = mapped_column(Float)
     rebate_rate: Mapped[float | None] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(64))
+
+class SyncRun(Base):
+    __tablename__ = "sync_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    running: Mapped[bool] = mapped_column(Boolean, default=True)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    processed: Mapped[int] = mapped_column(Integer, default=0)
+    saved: Mapped[int] = mapped_column(Integer, default=0)
+    not_found: Mapped[int] = mapped_column(Integer, default=0)
+    errors_json: Mapped[str | None] = mapped_column(Text)
