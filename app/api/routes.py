@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
 from ..models import BorrowSnapshot, DailyBar, FourHourBar, Split, Stock
-from ..providers.ibkr import fetch_borrow_snapshot
+from ..providers.ibkr import diagnose_borrow_sources, fetch_borrow_snapshot
 from ..services.metrics import refresh_split_metrics
 from ..services.sync_prices import PRICE_SYNC_STATUS, run_price_sync
 from ..services.sync_splits import sync_splits
@@ -135,7 +135,6 @@ async def run_borrow_sync():
             .order_by(Stock.symbol.asc())
         ).all()
 
-        # One current reverse-split event per symbol is enough for borrow collection.
         by_symbol = {}
         for sp, stock in rows:
             by_symbol[stock.symbol] = (sp, stock)
@@ -181,7 +180,6 @@ async def run_borrow_sync():
                 db.flush()
                 BORROW_SYNC_STATUS["saved"] += 1
 
-            # Recalculate readiness so Available immediately affects ranking.
             refresh_split_metrics(db, sp)
 
         db.commit()
@@ -216,6 +214,11 @@ async def sync_prices_now():
 @router.get("/sync/prices/status")
 def sync_prices_status():
     return PRICE_SYNC_STATUS
+
+
+@router.get("/debug/borrow/{symbol}")
+async def debug_borrow(symbol: str):
+    return await diagnose_borrow_sources(symbol)
 
 
 @router.get("/sync/borrow/all")
