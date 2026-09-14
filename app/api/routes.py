@@ -59,6 +59,7 @@ async def run_borrow_sync():
     db=SessionLocal(); run=None
     try:
         run=SyncRun(kind="borrow",running=True); db.add(run); db.commit(); db.refresh(run)
+        await sync_splits(db,start=RANGE_START,end=RANGE_END)
         today=date.today(); rows=db.execute(select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END,Split.effective_date<=today).order_by(Stock.symbol.asc())).all()
         targets={stock.symbol:(sp,stock) for sp,stock in rows}
         BORROW_SYNC_STATUS["total"]=len(targets); run.total=len(targets); db.commit()
