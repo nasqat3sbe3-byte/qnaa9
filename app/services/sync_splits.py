@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from ..models import Stock, Split
 from ..providers.splits import fetch_reverse_splits
 
-DEFAULT_START = date(2026, 6, 1)
+DEFAULT_START = date(2026, 5, 1)
 DEFAULT_END = date(2026, 9, 30)
 
 async def sync_splits(db: Session, start: date = DEFAULT_START, end: date = DEFAULT_END):
