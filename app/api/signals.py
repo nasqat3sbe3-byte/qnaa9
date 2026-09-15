@@ -33,6 +33,14 @@ def highest_after(db, stock_id, ready_at, fallback):
     if fallback is not None: vals.append(float(fallback))
     return max(vals) if vals else None
 
+def low_formed_date(db, stock_id, split_date, low):
+    if low is None: return None
+    bars=db.execute(select(DailyBar.trade_date,DailyBar.low).where(DailyBar.stock_id==stock_id,DailyBar.trade_date>=split_date).order_by(DailyBar.trade_date.desc())).all()
+    target=float(low); tol=max(0.0001,abs(target)*0.0005)
+    for d,v in bars:
+        if v is not None and abs(float(v)-target)<=tol: return d
+    return None
+
 def readiness_state(sp,b,live=None):
     av=None if b is None else b.available_shares
     live_low=(live or {}).get('live_day_low'); live_price=(live or {}).get('live_price')
@@ -103,12 +111,13 @@ async def signals(db:Session=Depends(get_db)):
     for sp,s in rows:
         if s.symbol not in latest: latest[s.symbol]=(sp,s)
     live=await get_live_prices(latest.keys())
-    states={}
+    states={}; low_dates={}
     for sp,s in latest.values():
         states[s.symbol]=readiness_state(sp,latest_borrow(db,s.id),live.get(s.symbol)); update_signal(db,sp,s,states[s.symbol])
+        low_dates[s.symbol]=today if states[s.symbol]['new_low_today'] else low_formed_date(db,s.id,sp.effective_date,sp.post_split_low)
     db.commit(); db.expire_all()
     sig_by_stock={sig.stock_id:sig for sig in db.scalars(select(HuntSignal)).all()}; out=[]
     for sp,s in latest.values():
         sig=sig_by_stock.get(s.id); st=states[s.symbol]; launched=bool(sig and sig.launched_at is not None); ready=bool(sig and sig.launched_at is None and st['full'])
-        out.append({'symbol':s.symbol,'effective_date':sp.effective_date,'ready':ready,'near_ready':st['shortlist'] and not st['full'] and not launched,'shortlist':st['shortlist'] and not launched,'readiness_pct':100.0 if ready else st['readiness_pct'],'missing_count':st['missing_count'],'missing':st['missing'],'strength':st['strength'],'new_low_today':st['new_low_today'],'effective_low':st['effective_low'],'effective_distance_pct':st['effective_distance_pct'],'effective_sessions':st['effective_sessions'],'launched':launched,'ready_at':sig.ready_at if sig else None,'ready_price':sig.ready_price if sig else None,'launched_at':sig.launched_at if sig else None,'launch_price':sig.launch_price if sig else None,'rise_pct':sig.max_rise_pct if sig else None,'max_price_after_ready':sig.max_price_after_ready if sig else None})
+        out.append({'symbol':s.symbol,'effective_date':sp.effective_date,'ready':ready,'near_ready':st['shortlist'] and not st['full'] and not launched,'shortlist':st['shortlist'] and not launched,'readiness_pct':100.0 if ready else st['readiness_pct'],'missing_count':st['missing_count'],'missing':st['missing'],'strength':st['strength'],'new_low_today':st['new_low_today'],'effective_low':st['effective_low'],'effective_low_date':low_dates[s.symbol],'effective_distance_pct':st['effective_distance_pct'],'effective_sessions':st['effective_sessions'],'launched':launched,'ready_at':sig.ready_at if sig else None,'ready_price':sig.ready_price if sig else None,'launched_at':sig.launched_at if sig else None,'launch_price':sig.launch_price if sig else None,'rise_pct':sig.max_rise_pct if sig else None,'max_price_after_ready':sig.max_price_after_ready if sig else None})
     kick_launch_refresh(); return out
