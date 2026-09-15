@@ -1,4 +1,5 @@
 from datetime import date, datetime
+import asyncio
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,6 +16,7 @@ CLOSE_AVAILABLE=20000
 CLOSE_DISTANCE_PCT=20
 CLOSE_SESSIONS=2
 LAUNCH_PCT=40
+_launch_task=None
 
 def get_db():
     db=SessionLocal()
@@ -54,7 +56,6 @@ def readiness_state(sp,b):
     full=price_ok and av_ok and dist_ok and sess_ok
     missing_count=len(missing)
     shortlist=full or (price_ok and close and 1<=missing_count<=2)
-    # Progressive readiness score: Available remains the heaviest factor.
     if av is None: av_pts=0
     elif av<=READY_AVAILABLE: av_pts=45
     elif av<=CLOSE_AVAILABLE: av_pts=45-15*((av-READY_AVAILABLE)/(CLOSE_AVAILABLE-READY_AVAILABLE))
@@ -82,6 +83,14 @@ def update_signal(db,sp,stock):
             if sig.max_rise_pct>=LAUNCH_PCT: sig.launched_at=datetime.utcnow(); sig.launch_price=hi
     return sig
 
+def kick_launch_refresh():
+    global _launch_task
+    try:
+        if _launch_task is None or _launch_task.done():
+            _launch_task=asyncio.create_task(refresh_launches())
+    except RuntimeError:
+        pass
+
 @router.get('/signals')
 async def signals(db:Session=Depends(get_db)):
     today=date.today(); rows=db.execute(select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END,Split.effective_date<=today).order_by(Stock.symbol,Split.effective_date.desc(),Split.id.desc())).all()
@@ -90,10 +99,11 @@ async def signals(db:Session=Depends(get_db)):
         if s.symbol not in latest: latest[s.symbol]=(sp,s)
     states={}
     for sp,s in latest.values(): states[s.symbol]=readiness_state(sp,latest_borrow(db,s.id)); update_signal(db,sp,s)
-    db.commit(); await refresh_launches(); db.expire_all()
+    db.commit(); db.expire_all()
     sig_by_stock={sig.stock_id:sig for sig in db.scalars(select(HuntSignal)).all()}; out=[]
     for sp,s in latest.values():
         sig=sig_by_stock.get(s.id); st=states[s.symbol]
         launched=bool(sig and sig.launched_at is not None); ready=bool(sig and sig.launched_at is None)
         out.append({'symbol':s.symbol,'ready':ready,'near_ready':st['shortlist'] and not st['full'] and not launched,'shortlist':st['shortlist'] and not launched,'readiness_pct':100.0 if ready else st['readiness_pct'],'missing_count':st['missing_count'],'missing':st['missing'],'strength':st['strength'],'launched':launched,'ready_at':sig.ready_at if sig else None,'ready_price':sig.ready_price if sig else None,'launched_at':sig.launched_at if sig else None,'launch_price':sig.launch_price if sig else None,'rise_pct':sig.max_rise_pct if sig else None,'max_price_after_ready':sig.max_price_after_ready if sig else None})
+    kick_launch_refresh()
     return out
