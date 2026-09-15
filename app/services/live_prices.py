@@ -39,9 +39,11 @@ async def get_live_prices(symbols):
         fresh={s:_CACHE[s][1] for s in symbols if s in _CACHE and now-_CACHE[s][0] < _CACHE_TTL}
         missing=[s for s in symbols if s not in fresh]
         if missing:
-            sem=asyncio.Semaphore(12)
-            limits=httpx.Limits(max_connections=16,max_keepalive_connections=12)
-            async with httpx.AsyncClient(timeout=12,follow_redirects=True,headers={"User-Agent":"Mozilla/5.0 QanasLivePrice/1.0"},limits=limits) as client:
+            # Mobile LIVE refresh: fetch more symbols in parallel while keeping a
+            # bounded connection pool so Render/Yahoo are not overloaded.
+            sem=asyncio.Semaphore(24)
+            limits=httpx.Limits(max_connections=28,max_keepalive_connections=24)
+            async with httpx.AsyncClient(timeout=10,follow_redirects=True,headers={"User-Agent":"Mozilla/5.0 QanasLivePrice/1.0"},limits=limits) as client:
                 results=await asyncio.gather(*(_fetch_one(client,sem,s) for s in missing))
             stamp=time.monotonic()
             for s,row in results:
