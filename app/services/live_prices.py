@@ -19,6 +19,7 @@ async def _fetch_one(client, sem, symbol):
             quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
             closes = quote.get("close") or []
             highs = quote.get("high") or []
+            lows = quote.get("low") or []
             valid=[]
             for i, ts in enumerate(timestamps):
                 if i < len(closes) and closes[i] is not None and float(closes[i]) > 0:
@@ -26,7 +27,8 @@ async def _fetch_one(client, sem, symbol):
             if not valid: return symbol, None
             ts, price = max(valid, key=lambda x:x[0])
             hi=[float(x) for x in highs if x is not None and float(x)>0]
-            return symbol, {"live_price":price,"live_timestamp":datetime.fromtimestamp(ts,tz=timezone.utc).isoformat(),"live_day_high":max(hi) if hi else price,"live_source":"yahoo_1m_prepost"}
+            lo=[float(x) for x in lows if x is not None and float(x)>0]
+            return symbol, {"live_price":price,"live_timestamp":datetime.fromtimestamp(ts,tz=timezone.utc).isoformat(),"live_day_high":max(hi) if hi else price,"live_day_low":min(lo) if lo else price,"live_source":"yahoo_1m_prepost"}
         except Exception:
             return symbol, None
 
