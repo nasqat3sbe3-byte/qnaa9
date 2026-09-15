@@ -37,10 +37,14 @@ def readiness_state(sp,b):
     dist=sp.distance_from_low_pct
     sessions=int(sp.stability_sessions or 0)
     price_ok=sp.current_price is not None and sp.current_price>0
+    half_ok=bool(sp.half_level_reached)
     av_ok=av is not None and av<=READY_AVAILABLE
     dist_ok=dist is not None and dist<=READY_DISTANCE_PCT
     sess_ok=sessions>=READY_SESSIONS
     missing=[]; close=True
+    if not half_ok:
+        missing.append(f'يحقق شرط النصف ≤ {sp.half_level:.4f}' if sp.half_level is not None else 'حساب مستوى النصف')
+        close=False
     if not av_ok:
         missing.append('Available ينزل إلى ≤10K' if av is not None else 'قراءة Available')
         close=close and av is not None and av<=CLOSE_AVAILABLE
@@ -53,9 +57,9 @@ def readiness_state(sp,b):
         close=close and sessions>=CLOSE_SESSIONS
     if not price_ok:
         missing.append('تحديث السعر الحالي'); close=False
-    full=price_ok and av_ok and dist_ok and sess_ok
+    full=price_ok and half_ok and av_ok and dist_ok and sess_ok
     missing_count=len(missing)
-    shortlist=full or (price_ok and close and 1<=missing_count<=2)
+    shortlist=full or (price_ok and half_ok and close and 1<=missing_count<=2)
     if av is None: av_pts=0
     elif av<=READY_AVAILABLE: av_pts=45
     elif av<=CLOSE_AVAILABLE: av_pts=45-15*((av-READY_AVAILABLE)/(CLOSE_AVAILABLE-READY_AVAILABLE))
@@ -67,6 +71,7 @@ def readiness_state(sp,b):
     sess_pts=25 if sessions>=4 else 19 if sessions==3 else 12 if sessions==2 else 6 if sessions==1 else 0
     pct=100.0 if full else round(min(99.0,av_pts+dist_pts+sess_pts),1)
     strengths=[]
+    if half_ok: strengths.append('شرط النصف ✓')
     if av_ok: strengths.append(f'Available {int(av):,} ✓')
     if dist_ok: strengths.append(f'عن القاع {dist:.2f}% ✓')
     if sess_ok: strengths.append('ثبات 4/4 ✓')
@@ -103,7 +108,8 @@ async def signals(db:Session=Depends(get_db)):
     sig_by_stock={sig.stock_id:sig for sig in db.scalars(select(HuntSignal)).all()}; out=[]
     for sp,s in latest.values():
         sig=sig_by_stock.get(s.id); st=states[s.symbol]
-        launched=bool(sig and sig.launched_at is not None); ready=bool(sig and sig.launched_at is None)
+        launched=bool(sig and sig.launched_at is not None)
+        ready=bool(sig and sig.launched_at is None and st['full'])
         out.append({'symbol':s.symbol,'ready':ready,'near_ready':st['shortlist'] and not st['full'] and not launched,'shortlist':st['shortlist'] and not launched,'readiness_pct':100.0 if ready else st['readiness_pct'],'missing_count':st['missing_count'],'missing':st['missing'],'strength':st['strength'],'launched':launched,'ready_at':sig.ready_at if sig else None,'ready_price':sig.ready_price if sig else None,'launched_at':sig.launched_at if sig else None,'launch_price':sig.launch_price if sig else None,'rise_pct':sig.max_rise_pct if sig else None,'max_price_after_ready':sig.max_price_after_ready if sig else None})
     kick_launch_refresh()
     return out
