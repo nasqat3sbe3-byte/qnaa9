@@ -22,8 +22,11 @@ def latest_borrow(db, stock_id):
     return db.scalar(select(BorrowSnapshot).where(BorrowSnapshot.stock_id==stock_id).order_by(BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc()).limit(1))
 
 def highest_after(db, stock_id, ready_at, fallback):
+    # Exclude the readiness calendar day from daily bars because a daily high has
+    # no timestamp and may have happened before readiness. The 1m live monitor
+    # handles the readiness day with exact timestamps.
     d=ready_at.date()
-    highs=db.scalars(select(DailyBar.high).where(DailyBar.stock_id==stock_id,DailyBar.trade_date>=d)).all()
+    highs=db.scalars(select(DailyBar.high).where(DailyBar.stock_id==stock_id,DailyBar.trade_date>d)).all()
     vals=[float(x) for x in highs if x is not None]
     if fallback is not None: vals.append(float(fallback))
     return max(vals) if vals else None
@@ -35,12 +38,12 @@ def update_signal(db, sp, stock):
     if sig is None and qualifies:
         sig=HuntSignal(split_id=sp.id,stock_id=stock.id,ready_at=datetime.utcnow(),ready_price=sp.current_price,ready_low=sp.post_split_low,ready_available=b.available_shares,max_price_after_ready=sp.current_price,max_rise_pct=0.0)
         db.add(sig); db.flush()
-    if sig is not None:
+    if sig is not None and sig.launched_at is None:
         hi=highest_after(db,stock.id,sig.ready_at,sp.current_price)
         if hi is not None and sig.ready_price>0:
             sig.max_price_after_ready=max(float(sig.max_price_after_ready or 0),hi)
             sig.max_rise_pct=round((sig.max_price_after_ready/sig.ready_price-1)*100,2)
-            if sig.launched_at is None and sig.max_rise_pct>=LAUNCH_PCT:
+            if sig.max_rise_pct>=LAUNCH_PCT:
                 sig.launched_at=datetime.utcnow(); sig.launch_price=hi
     return sig
 
@@ -51,18 +54,15 @@ async def signals(db:Session=Depends(get_db)):
     latest={}
     for sp,s in rows:
         if s.symbol not in latest: latest[s.symbol]=(sp,s)
-    tracked=[]
-    for sp,s in latest.values():
-        sig=update_signal(db,sp,s)
-        if sig: tracked.append((sig.id,s.symbol))
-    # Commit readiness first. The isolated monitor then reads only HuntSignal rows
-    # and updates launch high/+40%; it never changes borrow, split, low or stability data.
+    for sp,s in latest.values(): update_signal(db,sp,s)
     db.commit()
+    # Detect extended-hours +40% launches and recycle completed 10-session cycles.
     await refresh_launches()
     db.expire_all()
+    symbol_by_stock={s.id:s.symbol for _,s in latest.values()}
     out=[]
-    for sig_id,symbol in tracked:
-        sig=db.get(HuntSignal,sig_id)
-        if sig:
-            out.append({'symbol':symbol,'ready':sig.launched_at is None,'launched':sig.launched_at is not None,'ready_at':sig.ready_at,'ready_price':sig.ready_price,'launched_at':sig.launched_at,'launch_price':sig.launch_price,'rise_pct':sig.max_rise_pct,'max_price_after_ready':sig.max_price_after_ready})
+    for sig in db.scalars(select(HuntSignal)).all():
+        symbol=symbol_by_stock.get(sig.stock_id)
+        if not symbol: continue
+        out.append({'symbol':symbol,'ready':sig.launched_at is None,'launched':sig.launched_at is not None,'ready_at':sig.ready_at,'ready_price':sig.ready_price,'launched_at':sig.launched_at,'launch_price':sig.launch_price,'rise_pct':sig.max_rise_pct,'max_price_after_ready':sig.max_price_after_ready})
     return out
