@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from bs4 import BeautifulSoup
 from dateutil import parser as dtparser
+from .ibkr_ftp import fetch_borrow_snapshot_ftp
 
 _EXCHANGES=("nasdaq","nyse","nyseamerican","otc")
 _EXCHANGE_ALIASES={"nasdaq":"nasdaq","nasdaqgs":"nasdaq","nasdaqgm":"nasdaq","nasdaqcm":"nasdaq","nyse":"nyse","nyseamerican":"nyseamerican","amex":"nyseamerican","american":"nyseamerican","otc":"otc"}
@@ -74,10 +75,17 @@ async def _fetch_exchange(client,symbol_lower,exchange):
     return None
 async def fetch_borrow_snapshot(symbol,client=None,exchange=None):
     clean_symbol=symbol.upper().strip();symbol_lower=clean_symbol.lower();own_client=client is None
+    # Primary source: IBKR's own public US short-stock file.  The provider caches
+    # the file briefly, so a 200+ symbol refresh downloads it only once.
+    try:
+        direct=await fetch_borrow_snapshot_ftp(clean_symbol)
+        if direct:return direct
+    except Exception:
+        pass
+    # Fallback only for symbols absent from the IBKR file or if FTP is unavailable.
     if own_client:client=httpx.AsyncClient(timeout=30,follow_redirects=True,headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/153 Safari/537.36","Accept-Language":"en-US,en;q=0.9","Cache-Control":"no-cache","Pragma":"no-cache"})
     try:
-        exact=_normalize_exchange(exchange)
-        exchanges=(exact,) if exact else _EXCHANGES
+        exact=_normalize_exchange(exchange);exchanges=(exact,) if exact else _EXCHANGES
         for ex in exchanges:
             parsed=await _fetch_exchange(client,symbol_lower,ex)
             if parsed:return parsed
