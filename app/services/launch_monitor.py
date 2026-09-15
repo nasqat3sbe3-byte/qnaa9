@@ -45,7 +45,9 @@ def _recent_daily_launch(db, stock_id, split_date):
         prev=bars[i-1]; cur=bars[i]
         if prev.close and prev.close>0 and cur.high and cur.high>0:
             rise=(float(cur.high)/float(prev.close)-1)*100
-            if rise>=LAUNCH_PCT and (best is None or cur.trade_date>best['date']):
+            # Trophy value is the highest move in the recent window, measured
+            # from the previous regular-session close to that session's high.
+            if rise>=LAUNCH_PCT and (best is None or rise>best['rise']):
                 best={'date':cur.trade_date,'baseline':float(prev.close),'price':float(cur.high),'rise':round(rise,2)}
     return best
 
@@ -68,7 +70,6 @@ async def refresh_launches():
 
         signals={s.split_id:s for s in db.scalars(select(HuntSignal)).all()}
         launched=0; backfilled=0
-        # First recover launches that happened while the site/monitor was asleep.
         for sp,stock in latest.values():
             sig=signals.get(sp.id)
             if sig is not None and sig.launched_at is not None: continue
@@ -84,7 +85,7 @@ async def refresh_launches():
         if backfilled: db.commit()
 
         sem=asyncio.Semaphore(8)
-        async with httpx.AsyncClient(timeout=12,follow_redirects=True,headers={"User-Agent":"Mozilla/5.0 QanasLaunchMonitor/3.0"}) as client:
+        async with httpx.AsyncClient(timeout=12,follow_redirects=True,headers={"User-Agent":"Mozilla/5.0 QanasLaunchMonitor/3.1"}) as client:
             async def one(sp,stock):
                 sig=signals.get(sp.id)
                 async with sem:
