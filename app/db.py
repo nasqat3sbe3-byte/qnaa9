@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from .config import settings
 
@@ -12,8 +12,10 @@ def normalize_database_url(url: str) -> str:
 
 
 database_url = normalize_database_url(settings.database_url)
-kwargs = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-engine = create_engine(database_url, pool_pre_ping=True, connect_args=kwargs)
+kwargs = {"check_same_thread": False} if database_url.startswith("sqlite") else {
+    "connect_timeout": 8,
+}
+engine = create_engine(database_url, pool_pre_ping=True, pool_timeout=10, connect_args=kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
@@ -21,18 +23,17 @@ class Base(DeclarativeBase):
     pass
 
 
-def _migrate_existing_schema():
-    """Small idempotent migrations for the existing Render database."""
-    inspector = inspect(engine)
-    if "stocks" not in inspector.get_table_names():
-        return
-    columns = {c["name"] for c in inspector.get_columns("stocks")}
-    if "exchange" not in columns:
-        with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE stocks ADD COLUMN exchange VARCHAR(32)"))
-
-
 def init_db():
     from . import models  # noqa: F401
+    # Keep startup bounded. create_all handles fresh databases; the ALTER is
+    # idempotent on PostgreSQL and avoids slow schema introspection on Render.
     Base.metadata.create_all(engine)
-    _migrate_existing_schema()
+    if not database_url.startswith("sqlite"):
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS exchange VARCHAR(32)"))
+    else:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE stocks ADD COLUMN exchange VARCHAR(32)"))
+        except Exception:
+            pass
