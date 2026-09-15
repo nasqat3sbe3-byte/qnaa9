@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models import BorrowSnapshot, DailyBar, FourHourBar, Split, Stock, SyncRun
 from ..providers.ibkr import fetch_borrow_snapshot
+from ..providers.ibkr_ftp import probe_ibkr_ftp
 from ..services.metrics import refresh_split_metrics
 from ..services.sync_prices import PRICE_SYNC_STATUS, run_price_sync
 from ..services.sync_splits import sync_splits
@@ -84,6 +85,10 @@ async def run_borrow_sync():
 
 @router.get("/health")
 def health():return {"ok":True}
+@router.get("/test/ibkr-ftp/{symbol}")
+async def test_ibkr_ftp(symbol:str):
+    try:return await probe_ibkr_ftp(symbol)
+    except Exception as exc:raise HTTPException(status_code=502,detail=f"IBKR FTP test failed: {str(exc)[:240]}")
 @router.get("/sync/splits")
 async def sync_splits_now(db:Session=Depends(get_db)):return await sync_splits(db,start=RANGE_START,end=RANGE_END)
 @router.get("/sync/prices")
