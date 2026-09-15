@@ -38,10 +38,7 @@ class DailyBar(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
     trade_date: Mapped[date] = mapped_column(Date, index=True)
-    open: Mapped[float] = mapped_column(Float)
-    high: Mapped[float] = mapped_column(Float)
-    low: Mapped[float] = mapped_column(Float)
-    close: Mapped[float] = mapped_column(Float)
+    open: Mapped[float] = mapped_column(Float); high: Mapped[float] = mapped_column(Float); low: Mapped[float] = mapped_column(Float); close: Mapped[float] = mapped_column(Float)
     volume: Mapped[float | None] = mapped_column(Float)
 
 class FourHourBar(Base):
@@ -50,10 +47,7 @@ class FourHourBar(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
     bar_time: Mapped[datetime] = mapped_column(DateTime, index=True)
-    open: Mapped[float] = mapped_column(Float)
-    high: Mapped[float] = mapped_column(Float)
-    low: Mapped[float] = mapped_column(Float)
-    close: Mapped[float] = mapped_column(Float)
+    open: Mapped[float] = mapped_column(Float); high: Mapped[float] = mapped_column(Float); low: Mapped[float] = mapped_column(Float); close: Mapped[float] = mapped_column(Float)
     volume: Mapped[float | None] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(32), default="yahoo_1h")
 
@@ -67,6 +61,20 @@ class BorrowSnapshot(Base):
     rebate_rate: Mapped[float | None] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(64))
 
+class HuntSignal(Base):
+    __tablename__ = "hunt_signals"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    split_id: Mapped[int] = mapped_column(ForeignKey("splits.id"), unique=True, index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    ready_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    ready_price: Mapped[float] = mapped_column(Float)
+    ready_low: Mapped[float | None] = mapped_column(Float)
+    ready_available: Mapped[float | None] = mapped_column(Float)
+    launched_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    launch_price: Mapped[float | None] = mapped_column(Float)
+    max_price_after_ready: Mapped[float | None] = mapped_column(Float)
+    max_rise_pct: Mapped[float | None] = mapped_column(Float)
+
 class SyncRun(Base):
     __tablename__ = "sync_runs"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -74,8 +82,5 @@ class SyncRun(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     running: Mapped[bool] = mapped_column(Boolean, default=True)
-    total: Mapped[int] = mapped_column(Integer, default=0)
-    processed: Mapped[int] = mapped_column(Integer, default=0)
-    saved: Mapped[int] = mapped_column(Integer, default=0)
-    not_found: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int] = mapped_column(Integer, default=0); processed: Mapped[int] = mapped_column(Integer, default=0); saved: Mapped[int] = mapped_column(Integer, default=0); not_found: Mapped[int] = mapped_column(Integer, default=0)
     errors_json: Mapped[str | None] = mapped_column(Text)
