@@ -1,12 +1,10 @@
 import asyncio
 import json
 from datetime import date, datetime
-
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
-
 from ..db import SessionLocal
 from ..models import BorrowSnapshot, DailyBar, FourHourBar, Split, Stock, SyncRun
 from ..providers.ibkr import fetch_borrow_snapshot
@@ -14,8 +12,10 @@ from ..providers.ibkr_ftp import probe_ibkr_ftp
 from ..services.metrics import refresh_split_metrics
 from ..services.sync_prices import PRICE_SYNC_STATUS, run_price_sync
 from ..services.sync_splits import sync_splits
+from .hunt_signals import router as hunt_signals_router
 
 router = APIRouter()
+router.include_router(hunt_signals_router)
 RANGE_START=date(2026,5,1); RANGE_END=date(2026,9,30)
 BORROW_SYNC_STATUS={"running":False,"processed":0,"total":0,"saved":0,"not_found":0,"errors":[],"last_finished":None}
 BORROW_SYNC_CONCURRENCY=32
@@ -32,30 +32,25 @@ def _four_hour_stats(db,stock_id,effective_date):
     return {"four_hour_highest_rise_pct":round(((best.high/best.open)-1)*100,2),"four_hour_highest_rise_open":best.open,"four_hour_highest_rise_high":best.high,"four_hour_highest_rise_time":best.bar_time.isoformat(),"four_hour_highest_price":max(b.high for b in bars),"four_hour_source":best.source}
 
 def _latest_borrow(db,stock_id):return db.scalar(select(BorrowSnapshot).where(BorrowSnapshot.stock_id==stock_id).order_by(BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc()).limit(1))
-
 def _latest_split_rows(db,include_future=False):
-    today=date.today(); q=select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END)
+    today=date.today();q=select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END)
     if not include_future:q=q.where(Split.effective_date<=today)
-    rows=db.execute(q.order_by(Stock.symbol.asc(),Split.effective_date.desc(),Split.id.desc())).all(); latest={}
+    rows=db.execute(q.order_by(Stock.symbol.asc(),Split.effective_date.desc(),Split.id.desc())).all();latest={}
     for sp,s in rows:
         if s.symbol not in latest:latest[s.symbol]=(sp,s)
     return list(latest.values())
-
 def _split_payload(db,sp,s):
-    b=_latest_borrow(db,s.id); p={"symbol":s.symbol,"company":s.company_name,"effective_date":sp.effective_date,"ratio":f"{sp.split_from:g} for {sp.split_to:g}","status":sp.status,"post_split_open":sp.post_split_open,"post_split_high":sp.post_split_high,"post_split_low":sp.post_split_low,"current_price":sp.current_price,"distance_from_low_pct":sp.distance_from_low_pct,"stability_sessions":sp.stability_sessions,"half_level":sp.half_level,"half_level_reference":"highest_price_since_split","half_level_reached":sp.half_level_reached,"ready_score":sp.ready_score,"available":b.available_shares if b else None,"ctb":b.fee_rate if b else None,"fee_rate":b.fee_rate if b else None,"rebate_rate":b.rebate_rate if b else None,"borrow_source":b.source if b else None,"borrow_timestamp":b.ts if b else None}; p.update(_four_hour_stats(db,s.id,sp.effective_date));return p
-
+    b=_latest_borrow(db,s.id);p={"symbol":s.symbol,"company":s.company_name,"effective_date":sp.effective_date,"ratio":f"{sp.split_from:g} for {sp.split_to:g}","status":sp.status,"post_split_open":sp.post_split_open,"post_split_high":sp.post_split_high,"post_split_low":sp.post_split_low,"current_price":sp.current_price,"distance_from_low_pct":sp.distance_from_low_pct,"stability_sessions":sp.stability_sessions,"half_level":sp.half_level,"half_level_reference":"highest_price_since_split","half_level_reached":sp.half_level_reached,"ready_score":sp.ready_score,"available":b.available_shares if b else None,"ctb":b.fee_rate if b else None,"fee_rate":b.fee_rate if b else None,"rebate_rate":b.rebate_rate if b else None,"borrow_source":b.source if b else None,"borrow_timestamp":b.ts if b else None};p.update(_four_hour_stats(db,s.id,sp.effective_date));return p
 async def _borrow_fetch_one(client,sem,symbol):
     async with sem:
         try:return symbol,await fetch_borrow_snapshot(symbol,client=client),None
         except Exception as exc:return symbol,None,str(exc)
-
 def _run_payload(r):
     if not r:return {"running":False,"processed":0,"total":0,"saved":0,"not_found":0,"errors":[],"missing_symbols":[],"last_finished":None}
     try:errors=json.loads(r.errors_json or "[]")
     except:errors=[]
     missing=[e.get("symbol") for e in errors if isinstance(e,dict) and e.get("error")=="borrow data not found" and e.get("symbol")]
     return {"running":r.running,"processed":r.processed,"total":r.total,"saved":r.saved,"not_found":r.not_found,"errors":errors,"missing_symbols":missing,"started_at":r.started_at,"last_finished":r.finished_at}
-
 async def run_borrow_sync():
     if BORROW_SYNC_STATUS["running"]:return BORROW_SYNC_STATUS
     BORROW_SYNC_STATUS.update({"running":True,"processed":0,"total":0,"saved":0,"not_found":0,"errors":[],"last_finished":None});db=SessionLocal();run=None
@@ -71,8 +66,7 @@ async def run_borrow_sync():
                 symbol,snap,err=await task;sp,stock=targets[symbol];BORROW_SYNC_STATUS["processed"]+=1;run.processed+=1
                 if err:BORROW_SYNC_STATUS["errors"].append({"symbol":symbol,"error":err[:180]})
                 elif not snap:BORROW_SYNC_STATUS["not_found"]+=1;run.not_found+=1;BORROW_SYNC_STATUS["errors"].append({"symbol":symbol,"error":"borrow data not found"})
-                else:
-                    db.add(BorrowSnapshot(stock_id=stock.id,ts=datetime.utcnow(),available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"]));db.flush();BORROW_SYNC_STATUS["saved"]+=1;run.saved+=1;refresh_split_metrics(db,sp)
+                else:db.add(BorrowSnapshot(stock_id=stock.id,ts=datetime.utcnow(),available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"]));db.flush();BORROW_SYNC_STATUS["saved"]+=1;run.saved+=1;refresh_split_metrics(db,sp)
                 run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:200]);db.commit()
         run.running=False;run.finished_at=datetime.utcnow();run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:200]);db.commit();BORROW_SYNC_STATUS["last_finished"]=run.finished_at.isoformat()
     except Exception as exc:
@@ -82,7 +76,6 @@ async def run_borrow_sync():
             except:db.rollback()
     finally:BORROW_SYNC_STATUS["running"]=False;db.close()
     return BORROW_SYNC_STATUS
-
 @router.get("/health")
 def health():return {"ok":True}
 @router.get("/test/ibkr-ftp/{symbol}")
