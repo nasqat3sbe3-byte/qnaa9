@@ -14,11 +14,9 @@ from ..services.sync_prices import PRICE_SYNC_STATUS, run_price_sync
 from ..services.sync_splits import sync_splits
 from .hunt_signals import router as hunt_signals_router
 
-router = APIRouter()
-router.include_router(hunt_signals_router)
+router = APIRouter(); router.include_router(hunt_signals_router)
 RANGE_START=date(2026,5,1); RANGE_END=date(2026,9,30)
-BORROW_SYNC_STATUS={"running":False,"processed":0,"total":0,"saved":0,"not_found":0,"errors":[],"last_finished":None}
-BORROW_SYNC_CONCURRENCY=32
+BORROW_SYNC_STATUS={"running":False,"processed":0,"total":0,"saved":0,"not_found":0,"errors":[],"last_finished":None}; BORROW_SYNC_CONCURRENCY=32
 
 def get_db():
     db=SessionLocal()
@@ -28,8 +26,7 @@ def get_db():
 def _four_hour_stats(db,stock_id,effective_date):
     bars=db.scalars(select(FourHourBar).where(FourHourBar.stock_id==stock_id).order_by(FourHourBar.bar_time.asc())).all(); bars=[b for b in bars if b.bar_time.date()>=effective_date and b.open and b.open>0]
     if not bars:return {"four_hour_highest_rise_pct":None,"four_hour_highest_rise_open":None,"four_hour_highest_rise_high":None,"four_hour_highest_rise_time":None,"four_hour_highest_price":None,"four_hour_source":None}
-    best=max(bars,key=lambda b:((b.high/b.open)-1)*100)
-    return {"four_hour_highest_rise_pct":round(((best.high/best.open)-1)*100,2),"four_hour_highest_rise_open":best.open,"four_hour_highest_rise_high":best.high,"four_hour_highest_rise_time":best.bar_time.isoformat(),"four_hour_highest_price":max(b.high for b in bars),"four_hour_source":best.source}
+    best=max(bars,key=lambda b:((b.high/b.open)-1)*100); return {"four_hour_highest_rise_pct":round(((best.high/best.open)-1)*100,2),"four_hour_highest_rise_open":best.open,"four_hour_highest_rise_high":best.high,"four_hour_highest_rise_time":best.bar_time.isoformat(),"four_hour_highest_price":max(b.high for b in bars),"four_hour_source":best.source}
 
 def _latest_borrow(db,stock_id):return db.scalar(select(BorrowSnapshot).where(BorrowSnapshot.stock_id==stock_id).order_by(BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc()).limit(1))
 def _latest_split_rows(db,include_future=False):
@@ -39,8 +36,20 @@ def _latest_split_rows(db,include_future=False):
     for sp,s in rows:
         if s.symbol not in latest:latest[s.symbol]=(sp,s)
     return list(latest.values())
+def _progressive_score(sp,b):
+    av=b.available_shares if b else None; dist=sp.distance_from_low_pct; sessions=int(sp.stability_sessions or 0)
+    if av is None: ap=0
+    elif av<=10000: ap=45
+    elif av<=20000: ap=45-15*((av-10000)/10000)
+    else: ap=0
+    if dist is None: dp=0
+    elif dist<=10: dp=30
+    elif dist<=20: dp=30-15*((dist-10)/10)
+    else: dp=0
+    spoints=25 if sessions>=4 else 19 if sessions==3 else 12 if sessions==2 else 6 if sessions==1 else 0
+    return round(min(100,ap+dp+spoints),1)
 def _split_payload(db,sp,s):
-    b=_latest_borrow(db,s.id);p={"symbol":s.symbol,"company":s.company_name,"effective_date":sp.effective_date,"ratio":f"{sp.split_from:g} for {sp.split_to:g}","status":sp.status,"post_split_open":sp.post_split_open,"post_split_high":sp.post_split_high,"post_split_low":sp.post_split_low,"current_price":sp.current_price,"distance_from_low_pct":sp.distance_from_low_pct,"stability_sessions":sp.stability_sessions,"half_level":sp.half_level,"half_level_reference":"highest_price_since_split","half_level_reached":sp.half_level_reached,"ready_score":sp.ready_score,"available":b.available_shares if b else None,"ctb":b.fee_rate if b else None,"fee_rate":b.fee_rate if b else None,"rebate_rate":b.rebate_rate if b else None,"borrow_source":b.source if b else None,"borrow_timestamp":b.ts if b else None};p.update(_four_hour_stats(db,s.id,sp.effective_date));return p
+    b=_latest_borrow(db,s.id);score=_progressive_score(sp,b);p={"symbol":s.symbol,"company":s.company_name,"effective_date":sp.effective_date,"ratio":f"{sp.split_from:g} for {sp.split_to:g}","status":sp.status,"post_split_open":sp.post_split_open,"post_split_high":sp.post_split_high,"post_split_low":sp.post_split_low,"current_price":sp.current_price,"distance_from_low_pct":sp.distance_from_low_pct,"stability_sessions":sp.stability_sessions,"half_level":sp.half_level,"half_level_reference":"highest_price_since_split","half_level_reached":sp.half_level_reached,"ready_score":score,"available":b.available_shares if b else None,"ctb":b.fee_rate if b else None,"fee_rate":b.fee_rate if b else None,"rebate_rate":b.rebate_rate if b else None,"borrow_source":b.source if b else None,"borrow_timestamp":b.ts if b else None};p.update(_four_hour_stats(db,s.id,sp.effective_date));return p
 async def _borrow_fetch_one(client,sem,symbol):
     async with sem:
         try:return symbol,await fetch_borrow_snapshot(symbol,client=client),None
@@ -49,17 +58,14 @@ def _run_payload(r):
     if not r:return {"running":False,"processed":0,"total":0,"saved":0,"not_found":0,"errors":[],"missing_symbols":[],"last_finished":None}
     try:errors=json.loads(r.errors_json or "[]")
     except:errors=[]
-    missing=[e.get("symbol") for e in errors if isinstance(e,dict) and e.get("error")=="borrow data not found" and e.get("symbol")]
-    return {"running":r.running,"processed":r.processed,"total":r.total,"saved":r.saved,"not_found":r.not_found,"errors":errors,"missing_symbols":missing,"started_at":r.started_at,"last_finished":r.finished_at}
+    missing=[e.get("symbol") for e in errors if isinstance(e,dict) and e.get("error")=="borrow data not found" and e.get("symbol")];return {"running":r.running,"processed":r.processed,"total":r.total,"saved":r.saved,"not_found":r.not_found,"errors":errors,"missing_symbols":missing,"started_at":r.started_at,"last_finished":r.finished_at}
 async def run_borrow_sync():
     if BORROW_SYNC_STATUS["running"]:return BORROW_SYNC_STATUS
     BORROW_SYNC_STATUS.update({"running":True,"processed":0,"total":0,"saved":0,"not_found":0,"errors":[],"last_finished":None});db=SessionLocal();run=None
     try:
-        run=SyncRun(kind="borrow",running=True);db.add(run);db.commit();db.refresh(run);await sync_splits(db,start=RANGE_START,end=RANGE_END);today=date.today()
-        missing_prices=db.scalar(select(func.count(Split.id)).where(Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END,Split.effective_date<=today,Split.post_split_open.is_(None))) or 0
+        run=SyncRun(kind="borrow",running=True);db.add(run);db.commit();db.refresh(run);await sync_splits(db,start=RANGE_START,end=RANGE_END);today=date.today();missing_prices=db.scalar(select(func.count(Split.id)).where(Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END,Split.effective_date<=today,Split.post_split_open.is_(None))) or 0
         if missing_prices and not PRICE_SYNC_STATUS["running"]:asyncio.create_task(run_price_sync(start=RANGE_START,end=RANGE_END))
-        rows=_latest_split_rows(db);targets={s.symbol:(sp,s) for sp,s in rows};BORROW_SYNC_STATUS["total"]=len(targets);run.total=len(targets);db.commit()
-        sem=asyncio.Semaphore(BORROW_SYNC_CONCURRENCY);headers={"User-Agent":"Mozilla/5.0 QanasDataEngine/1.0","Cache-Control":"no-cache, no-store","Pragma":"no-cache"};limits=httpx.Limits(max_connections=64,max_keepalive_connections=40)
+        rows=_latest_split_rows(db);targets={s.symbol:(sp,s) for sp,s in rows};BORROW_SYNC_STATUS["total"]=len(targets);run.total=len(targets);db.commit();sem=asyncio.Semaphore(BORROW_SYNC_CONCURRENCY);headers={"User-Agent":"Mozilla/5.0 QanasDataEngine/1.0","Cache-Control":"no-cache, no-store","Pragma":"no-cache"};limits=httpx.Limits(max_connections=64,max_keepalive_connections=40)
         async with httpx.AsyncClient(timeout=30,follow_redirects=True,headers=headers,limits=limits) as client:
             tasks=[asyncio.create_task(_borrow_fetch_one(client,sem,symbol)) for symbol in targets]
             for task in asyncio.as_completed(tasks):
@@ -121,4 +127,4 @@ def stock_detail(symbol:str,db:Session=Depends(get_db)):
     sp,s=row;return _split_payload(db,sp,s)
 @router.get("/hunt")
 def hunt(db:Session=Depends(get_db)):
-    rows=_latest_split_rows(db);rows.sort(key=lambda x:(x[0].ready_score is not None,x[0].ready_score or -1,x[0].effective_date),reverse=True);return [_split_payload(db,sp,s) for sp,s in rows]
+    rows=_latest_split_rows(db);rows.sort(key=lambda x:_progressive_score(x[0],_latest_borrow(db,x[1].id)),reverse=True);return [_split_payload(db,sp,s) for sp,s in rows]
