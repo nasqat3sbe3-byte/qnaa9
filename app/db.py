@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from .config import settings
 
@@ -21,6 +21,18 @@ class Base(DeclarativeBase):
     pass
 
 
+def _migrate_existing_schema():
+    """Small idempotent migrations for the existing Render database."""
+    inspector = inspect(engine)
+    if "stocks" not in inspector.get_table_names():
+        return
+    columns = {c["name"] for c in inspector.get_columns("stocks")}
+    if "exchange" not in columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE stocks ADD COLUMN exchange VARCHAR(32)"))
+
+
 def init_db():
     from . import models  # noqa: F401
     Base.metadata.create_all(engine)
+    _migrate_existing_schema()
