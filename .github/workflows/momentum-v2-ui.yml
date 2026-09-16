@@ -1,0 +1,41 @@
+name: Momentum V2 UI
+on:
+  push:
+    paths:
+      - '.github/workflows/momentum-v2-ui.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch momentum rules and selector
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('app/main.py'); s=p.read_text()
+          s=s.replace("let data=[],signals={},live={},filter='all',liveBusy=false;", "let data=[],signals={},live={},filter='all',liveBusy=false,momentumAvail=30000;")
+          old="if(filter==='momentum')a=a.filter(x=>x.available!=null&&Number(x.available)<=1000&&x.rebate_rate!=null&&Number(x.rebate_rate)<=-100&&mom(x)>=5);"
+          new="if(filter==='momentum')a=a.filter(x=>x.available!=null&&Number(x.available)<=momentumAvail);"
+          if old not in s: raise SystemExit('momentum rule target not found')
+          s=s.replace(old,new)
+          oldsort="filter==='momentum'?(mom(b)-mom(a)||Number(a.rebate_rate)-Number(b.rebate_rate)||Number(a.available)-Number(b.available)):"
+          newsort="filter==='momentum'?(Number(a.available)-Number(b.available)||((mom(b)||-999)-(mom(a)||-999))):"
+          if oldsort not in s: raise SystemExit('momentum sort target not found')
+          s=s.replace(oldsort,newsort)
+          s=s.replace("function render(){let a=filtered(),isTop=filter==='launched';", "function momentumControls(){return `<div class=\"momctl\"><span>⚡ الحد الأعلى للـ Available</span><select onchange=\"momentumAvail=Number(this.value);render()\"><option value=\"30000\" ${momentumAvail===30000?'selected':''}>≤ 30,000</option><option value=\"10000\" ${momentumAvail===10000?'selected':''}>≤ 10,000</option><option value=\"5000\" ${momentumAvail===5000?'selected':''}>≤ 5,000</option><option value=\"1000\" ${momentumAvail===1000?'selected':''}>≤ 1,000</option><option value=\"500\" ${momentumAvail===500?'selected':''}>≤ 500</option></select><small>نسبة الصعود للعرض فقط ولا تستبعد السهم</small></div>`}function render(){let a=filtered(),isTop=filter==='launched';")
+          marker="rows.innerHTML=a.map(row).join('');cards.innerHTML=a.map(card).join('')||'<div>لا توجد نتائج</div>'}"
+          repl="rows.innerHTML=a.map(row).join('');cards.innerHTML=(filter==='momentum'?momentumControls():'')+(a.map(card).join('')||'<div>لا توجد نتائج</div>')}"
+          if marker not in s: raise SystemExit('render output target not found')
+          s=s.replace(marker,repl)
+          css=".momctl{grid-column:1/-1;display:flex;align-items:center;gap:9px;padding:10px 12px;margin-bottom:4px;border:1px solid #29414b;border-radius:12px;background:#08151b}.momctl span{font-weight:900}.momctl select{background:#050b0f;color:#f3f6f7;border:1px solid #31505c;border-radius:8px;padding:7px 9px;font-weight:900}.momctl small{color:#71828e}"
+          s=s.replace('.mobile{display:none}', '.mobile{display:none}'+css)
+          p.write_text(s)
+      - name: Commit UI
+        run: |
+          git config user.name "qanas-ui-bot"
+          git config user.email "qanas-ui-bot@users.noreply.github.com"
+          git add app/main.py
+          git commit -m "Update momentum filter to configurable availability" || exit 0
+          git push
