@@ -1,0 +1,56 @@
+name: Live ignition radar
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/live-ignition-radar.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch live filter only
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('app/main.py'); s=p.read_text()
+          # Isolated browser-side rolling snapshots: no DB/schema/API/Signals/TOP changes.
+          anchor="let data=[],signals={},live={},news={},badNews={},filter='all',liveBusy=false,momentumAvail=30000;"
+          repl="let data=[],signals={},live={},news={},badNews={},filter='all',liveBusy=false,momentumAvail=30000,liveTrail={};"
+          s=s.replace(anchor,repl)
+          old="async function refreshLive(){if(liveBusy)return;liveBusy=true;rb.classList.add('busy');rb.textContent='جاري LIVE...';state.textContent='● تحديث LIVE';try{let l=await getj('/api/live-prices');live=Object.fromEntries(l.map(x=>[x.symbol,x]));merge();summary();render();refreshedAt.textContent=new Date().toLocaleTimeString('ar-SA');state.textContent='● متصل'}catch(e){state.textContent='● تعذر LIVE'}finally{liveBusy=false;rb.classList.remove('busy');rb.textContent='تحديث LIVE'}}"
+          new="async function refreshLive(){if(liveBusy)return;liveBusy=true;rb.classList.add('busy');rb.textContent='جاري LIVE...';state.textContent='● تحديث LIVE';try{let l=await getj('/api/live-prices'),now=Date.now();live=Object.fromEntries(l.map(x=>[x.symbol,x]));l.forEach(x=>{let p=Number(x.live_price);if(!(p>0))return;let a=liveTrail[x.symbol]||[];a.push({t:now,p});liveTrail[x.symbol]=a.filter(z=>now-z.t<=12*60*1000)});merge();summary();render();refreshedAt.textContent=new Date().toLocaleTimeString('ar-SA');state.textContent='● متصل'}catch(e){state.textContent='● تعذر LIVE'}finally{liveBusy=false;rb.classList.remove('busy');rb.textContent='تحديث LIVE'}}"
+          if old not in s: raise SystemExit('refreshLive anchor not found')
+          s=s.replace(old,new)
+          # Detect fresh acceleration from rolling 5-minute snapshot. First sample is warm-up, preventing old movers from flooding list.
+          insert="function ignition(x){let a=liveTrail[x.symbol]||[],now=Date.now(),cur=Number((x.live||{}).live_price);if(!(cur>0)||a.length<2)return null;let candidates=a.filter(z=>now-z.t>=3*60*1000&&now-z.t<=8*60*1000);if(!candidates.length)return null;let z=candidates.reduce((best,v)=>Math.abs(now-v.t-5*60*1000)<Math.abs(now-best.t-5*60*1000)?v:best,candidates[0]);let ch=(cur/z.p-1)*100,age=(now-z.t)/60000;return {pct:ch,mins:age,fresh:ch>=3&&ch<=14.99}}function ignitionTag(x){let g=ignition(x);return g&&g.fresh?'⚡ بدأ الآن +'+g.pct.toFixed(1)+'% / '+Math.round(g.mins)+'د':''}"
+          key="function momTag(x)"
+          pos=s.find(key)
+          if pos<0: raise SystemExit('momTag anchor not found')
+          s=s[:pos]+insert+s[pos:]
+          # Live list = fixed Available, no bad news, and only fresh 3-<15% acceleration. +15 remains display/history signal, not an old-mover entry gate.
+          oldf="if(filter==='momentum')a=a.filter(x=>x.available!=null&&Number(x.available)<=30000&&!badNews[x.symbol]);"
+          newf="if(filter==='momentum')a=a.filter(x=>x.available!=null&&Number(x.available)<=30000&&!badNews[x.symbol]&&ignition(x)?.fresh);"
+          if oldf not in s: raise SystemExit('filter anchor not found')
+          s=s.replace(oldf,newf)
+          olds="a.sort((a,b)=>filter==='momentum'?(Number(a.available)-Number(b.available)||((mom(b)||-999)-(mom(a)||-999)))"
+          newsort="a.sort((a,b)=>filter==='momentum'?((ignition(b)?.pct||0)-(ignition(a)?.pct||0)||Number(a.available)-Number(b.available))"
+          s=s.replace(olds,newsort)
+          # Add ignition tag to compact desktop/mobile cards without exposing borrow metrics outside.
+          s=s.replace("nt=news[x.symbol]?'🟢 NEWS':'';return `<tr", "nt=news[x.symbol]?'🟢 NEWS':'',ig=ignitionTag(x);return `<tr")
+          s=s.replace("<span class=\\\"pulse\\\">${fire}</span></td><td><span class=\\\"good\\\">${nt}</span>", "<span class=\\\"pulse\\\">${ig||fire}</span></td><td><span class=\\\"good\\\">${nt}</span>")
+          s=s.replace("nt=news[x.symbol]?'🟢 NEWS':'';return `<div class=\\\"card\\\"", "nt=news[x.symbol]?'🟢 NEWS':'',ig=ignitionTag(x);return `<div class=\\\"card\\\"")
+          s=s.replace("<span class=\\\"pulse\\\">${fire}</span><span class=\\\"good\\\">${nt}</span>", "<span class=\\\"pulse\\\">${ig||fire}</span><span class=\\\"good\\\">${nt}</span>")
+          # Radar styling only; TOP styles untouched.
+          s=s.replace(".momctl{", ".ignition{border-color:#31505c;background:radial-gradient(circle at 90% 0%,#143128 0,#0a171c 38%,#071017 80%)}.ignition .sym,.ignition .ticker{color:#dfffee}.momctl{")
+          s=s.replace("p.write_text(s)" if False else "","")
+          p.write_text(s)
+          PY
+      - name: Commit
+        run: |
+          git config user.name qanas-bot
+          git config user.email qanas-bot@users.noreply.github.com
+          git add app/main.py
+          git diff --cached --quiet || (git commit -m 'Make live filter a fresh ignition radar' && git push)
