@@ -1,0 +1,50 @@
+name: Finalize live filter only
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/live-filter-final.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch only live filter UI
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('app/main.py')
+          s=p.read_text()
+          # News state: positive marker + negative exclusion. Keep all existing LIVE/Signals refresh architecture untouched.
+          s=s.replace("let data=[],signals={},live={},filter='all',liveBusy=false,momentumAvail=30000;", "let data=[],signals={},live={},news={},badNews={},filter='all',liveBusy=false,momentumAvail=30000;")
+          s=s.replace("function sf(f,e){filter=f;window.momAvail=window.momAvail||30000;", "function sf(f,e){filter=f;")
+          old="async function refreshNews(){try{let n=await getj('/api/news-positive');news=Object.fromEntries(n.map(x=>[x.symbol,x]));if(filter==='momentum')render()}catch(e){}}"
+          new="async function refreshNews(){try{let n=await getj('/api/news-radar');news=Object.fromEntries((n.positive||[]).map(x=>[x.symbol,x]));badNews=Object.fromEntries((n.negative||[]).map(x=>[x.symbol,x]));if(filter==='momentum')render()}catch(e){}}"
+          s=s.replace(old,new)
+          s=s.replace("if(filter==='momentum')a=a.filter(x=>x.available!=null&&Number(x.available)<=momentumAvail);", "if(filter==='momentum')a=a.filter(x=>x.available!=null&&Number(x.available)<=30000&&!badNews[x.symbol]);")
+          # Remove threshold selector block if present.
+          import re
+          s=re.sub(r"\$\{filter==='momentum'\?`<div class=\\?\"momctl\\?\"[\s\S]*?</div>`:''\}", "", s)
+          # Compact momentum desktop row: ticker, current live price, +15 marker, positive NEWS only. Details remain in drawer.
+          marker="function row(x){"
+          if marker in s and "function momentumRow(x)" not in s:
+              compact="function momentumRow(x){let l=x.live||{},m=mom(x),fire=m!=null&&m>=15?'🔥 +15%':'',nt=news[x.symbol]?'🟢 NEWS':'';return `<tr onclick=\"openD('${x.symbol}')\" style=\"cursor:pointer\"><td class=\"tc\"><div class=\"ticker\">${x.symbol}</div><div class=\"co\">${x.company||''}</div></td><td class=\"live\">${money(l.live_price??x.current_price)}</td><td><span class=\"pulse\">${fire}</span></td><td><span class=\"good\">${nt}</span></td><td colspan=\"8\"></td></tr>`}"
+              s=s.replace(marker,compact+marker)
+          # Route momentum rows to compact renderer, without changing other filters/TOP.
+          s=s.replace("rows.innerHTML=a.map(row).join('');", "rows.innerHTML=a.map(x=>filter==='momentum'?momentumRow(x):row(x)).join('');")
+          # Compact mobile card for momentum only.
+          if "function momentumCard(x)" not in s:
+              key="function card(x){"
+              compact="function momentumCard(x){let l=x.live||{},m=mom(x),fire=m!=null&&m>=15?'🔥 +15%':'',nt=news[x.symbol]?'🟢 NEWS':'';return `<div class=\"card\" onclick=\"openD('${x.symbol}')\"><div class=\"cardtop\"><div><div class=\"sym\">${x.symbol}</div><div class=\"co\">${x.company||''}</div></div><div class=\"cprice live\">${money(l.live_price??x.current_price)}</div></div><div style=\"display:flex;gap:10px;margin-top:10px;font-weight:900\"><span class=\"pulse\">${fire}</span><span class=\"good\">${nt}</span></div></div>`}"
+              if key in s:s=s.replace(key,compact+key)
+          s=s.replace("cards.innerHTML=a.map(card).join('');", "cards.innerHTML=a.map(x=>filter==='momentum'?momentumCard(x):card(x)).join('');")
+          p.write_text(s)
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name qanas-bot
+          git config user.email qanas-bot@users.noreply.github.com
+          git add app/main.py
+          git diff --cached --quiet || (git commit -m 'Finalize compact live filter with negative-news exclusion' && git push)
