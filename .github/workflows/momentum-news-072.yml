@@ -1,0 +1,61 @@
+name: Momentum News Radar
+on:
+  push:
+    paths:
+      - '.github/workflows/momentum-news-072.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add isolated news endpoint and momentum UI
+        shell: python
+        run: |
+          from pathlib import Path
+          # Standalone endpoint: never blocks existing live/signals routes.
+          nf=Path('app/api/news.py')
+          nf.write_text('''from fastapi import APIRouter\nimport asyncio, time, re\nimport httpx\n\nrouter=APIRouter()\n_CACHE={"at":0,"data":[]}\nPOS=("contract","award","approval","approved","partnership","partner","collaboration","acquisition","merger","license","milestone","positive","successful","launch","order","agreement","patent","clearance")\nNEG=("offering","registered direct","private placement","bankruptcy","delisting","deficiency","reverse split","warrant exercise","going concern","default")\n\ndef tone(title):\n    t=(title or "").lower()\n    if any(w in t for w in NEG): return False\n    return any(w in t for w in POS)\n\nasync def _load():\n    global _CACHE\n    now=time.time()\n    if now-_CACHE["at"]<120: return _CACHE["data"]\n    # SEC current filings feed; fail-open to empty so site performance is unaffected.\n    url="https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&count=100&output=atom"\n    headers={"User-Agent":"Qanas market research contact admin@qanas.local","Accept":"application/atom+xml"}\n    try:\n        async with httpx.AsyncClient(timeout=6,headers=headers) as c:\n            r=await c.get(url); r.raise_for_status(); txt=r.text\n        entries=re.findall(r"<entry>(.*?)</entry>",txt,re.S)\n        out=[]\n        for e in entries:\n            title=re.sub(r"<[^>]+>"," ",re.search(r"<title[^>]*>(.*?)</title>",e,re.S).group(1) if re.search(r"<title[^>]*>(.*?)</title>",e,re.S) else "")\n            link=(re.search(r'href="([^"]+)"',e) or [None,""])[1]\n            updated=(re.search(r"<updated>(.*?)</updated>",e,re.S) or [None,""])[1]\n            m=re.search(r"\\(([A-Z]{1,6})\\)",title)\n            if m and tone(title): out.append({"symbol":m.group(1),"title":" ".join(title.split()),"published_at":updated,"url":link,"positive":True,"source":"SEC"})\n        _CACHE={"at":now,"data":out}\n    except Exception:\n        if not _CACHE["data"]: _CACHE={"at":now,"data":[]}\n    return _CACHE["data"]\n\n@router.get("/news-positive")\nasync def news_positive():\n    return await _load()\n''')
+          p=Path('app/main.py'); s=p.read_text()
+          if 'from .api.news import router as news_router' not in s:
+              s=s.replace('from .api.live import router as live_router','from .api.live import router as live_router\nfrom .api.news import router as news_router')
+              s=s.replace("app.include_router(live_router,prefix='/api')","app.include_router(live_router,prefix='/api'); app.include_router(news_router,prefix='/api')")
+          s=s.replace("let data=[],signals={},live={},filter='all',liveBusy=false;","let data=[],signals={},live={},news={},filter='all',liveBusy=false;")
+          # Make momentum entry based on available threshold only; default 30k. Rebate/move remain display info.
+          old="if(filter==='momentum')a=a.filter(x=>x.available!=null&&Number(x.available)<=1000&&x.rebate_rate!=null&&Number(x.rebate_rate)<=-100&&mom(x)>=5);"
+          new="if(filter==='momentum')a=a.filter(x=>x.available!=null&&Number(x.available)<=Number(window.momAvail||30000));"
+          if old in s: s=s.replace(old,new)
+          # Controls shown only when momentum selected.
+          s=s.replace("function sf(f,e){filter=f;", "function sf(f,e){filter=f;window.momAvail=window.momAvail||30000;")
+          s=s.replace("e.classList.add('active');render()}","e.classList.add('active');render();if(f==='momentum')refreshNews()}")
+          # Add async news loader; never awaited by base/live/signals.
+          marker="async function refreshSignals(){"
+          if 'async function refreshNews()' not in s:
+              s=s.replace(marker,"async function refreshNews(){try{let n=await getj('/api/news-positive');news=Object.fromEntries(n.map(x=>[x.symbol,x]));if(filter==='momentum')render()}catch(e){}}"+marker)
+          # Add helper UI and card augmentation.
+          marker2="function card(x){"
+          if 'function newsTag(x)' not in s:
+              helper="function newsTag(x){let n=news[x.symbol];return n?`<div style=\"margin-top:8px;padding:8px;border:1px solid #174c35;background:#082319;border-radius:9px;color:#63e6a5;font-weight:900\" onclick=\"event.stopPropagation();openNews('${x.symbol}')\">🟢 NEWS · ${n.source}<div style=\"font-size:9px;color:#a8cdbb;margin-top:3px;font-weight:500\">${n.title}</div></div>`:''}function openNews(sym){let n=news[sym];if(!n)return;drawer.classList.add('open');detail.innerHTML=`<h2>🟢 خبر إيجابي · ${sym}</h2><div class=\"mini\"><span>المصدر</span><b>${n.source}</b></div><div class=\"mini\"><span>العنوان</span><b>${n.title}</b></div><div class=\"mini\"><span>وقت النشر</span><b>${n.published_at||'—'}</b></div><p style=\"color:#69dfa8\">تم التقاطه كمحفز إيجابي مبدئيًا. راجع الإفصاح الأصلي قبل القرار.</p>${n.url?`<a class=\"btn gold\" target=\"_blank\" href=\"${n.url}\">المصدر الأصلي</a>`:''}` }"
+              s=s.replace(marker2,helper+marker2)
+          # Momentum mobile card: current price, move from today's low, news marker; available selector.
+          oldfrag="${filter==='momentum'?`<div class=\"metric\"><span>قاع اليوم</span><b>${money(l.live_day_low)}</b></div><div class=\"metric\"><span>صعود من قاع اليوم</span><b class=\"pulse\">${pct(mom(x))}</b></div>`:"
+          newfrag="${filter==='momentum'?`<div class=\"metric\"><span>السعر الآن</span><b class=\"live\">${money(p)}</b></div><div class=\"metric\"><span>ارتفع الآن</span><b class=\"pulse\">${pct(mom(x))}</b></div>`:"
+          if oldfrag in s: s=s.replace(oldfrag,newfrag)
+          oldend="<div class=\"fresh\">LIVE ${l.live_timestamp?'✓':'—'}</div></div>`}"
+          newend="${filter==='momentum'?newsTag(x):''}<div class=\"fresh\">LIVE ${l.live_timestamp?'✓':'—'}</div></div>`}"
+          if oldend in s: s=s.replace(oldend,newend)
+          # Insert availability chooser into render only for momentum without affecting other filters.
+          needle="function render(){let a=filtered(),isTop=filter==='launched';"
+          repl="function render(){let a=filtered(),isTop=filter==='launched';let oldCtl=document.getElementById('momctl');if(oldCtl)oldCtl.remove();if(filter==='momentum'){let c=document.createElement('div');c.id='momctl';c.style.cssText='display:flex;gap:6px;overflow:auto;margin:0 0 8px';c.innerHTML='<b style=\"padding:8px 4px;color:#71828e;white-space:nowrap\">Available:</b>'+[30000,10000,5000,1000,500].map(v=>`<button class=\"f ${Number(window.momAvail||30000)===v?'active':''}\" onclick=\"window.momAvail=${v};render()\">≤ ${v.toLocaleString()}</button>`).join('');document.querySelector('.tablebox').before(c)}"
+          if needle in s: s=s.replace(needle,repl)
+          p.write_text(s)
+      - name: Validate Python
+        run: python -m py_compile app/main.py app/api/news.py
+      - name: Commit
+        run: |
+          git config user.name "qanas-ui-bot"
+          git config user.email "qanas-ui-bot@users.noreply.github.com"
+          git add app/main.py app/api/news.py
+          git commit -m "Develop isolated momentum news radar" || exit 0
+          git push
