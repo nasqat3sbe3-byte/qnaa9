@@ -27,17 +27,24 @@ def get_db():
 def latest_borrow(db, stock_id):
     return db.scalar(select(BorrowSnapshot).where(BorrowSnapshot.stock_id==stock_id).order_by(BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc()).limit(1))
 
+def latest_borrows(db, stock_ids):
+    if not stock_ids: return {}
+    rows=db.scalars(select(BorrowSnapshot).where(BorrowSnapshot.stock_id.in_(stock_ids)).order_by(BorrowSnapshot.stock_id,BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc())).all()
+    out={}
+    for b in rows:
+        if b.stock_id not in out: out[b.stock_id]=b
+    return out
+
 def highest_after(db, stock_id, ready_at, fallback):
     d=ready_at.date(); highs=db.scalars(select(DailyBar.high).where(DailyBar.stock_id==stock_id,DailyBar.trade_date>d)).all()
     vals=[float(x) for x in highs if x is not None]
     if fallback is not None: vals.append(float(fallback))
     return max(vals) if vals else None
 
-def low_formed_date(db, stock_id, split_date, low):
+def low_formed_date_from_rows(rows, low):
     if low is None: return None
-    bars=db.execute(select(DailyBar.trade_date,DailyBar.low).where(DailyBar.stock_id==stock_id,DailyBar.trade_date>=split_date).order_by(DailyBar.trade_date.desc())).all()
     target=float(low); tol=max(0.0001,abs(target)*0.0005)
-    for d,v in bars:
+    for d,v in rows:
         if v is not None and abs(float(v)-target)<=tol: return d
     return None
 
@@ -85,10 +92,10 @@ def readiness_state(sp,b,live=None):
     if av_ok: strengths.append(f'Available {int(av):,} ✓')
     if dist_ok: strengths.append(f'عن القاع {dist:.2f}% ✓')
     if sess_ok: strengths.append('ثبات 4/4 ✓')
-    return {'full':full,'shortlist':shortlist,'readiness_pct':pct,'missing_count':missing_count,'missing':' + '.join(missing) if missing else 'مكتمل ✓','strength':' | '.join(strengths),'new_low_today':new_low,'effective_low':effective_low,'effective_distance_pct':dist,'effective_sessions':sessions}
+    return {'full':full,'shortlist':shortlist,'readiness_pct':pct,'missing_count':missing_count,'missing':' + '.join(missing) if missing else 'مكتمل ✓','strength':' | '.join(strengths),'half_ok':half_ok,'available_ok':av_ok,'distance_ok':dist_ok,'sessions_ok':sess_ok,'new_low_today':new_low,'effective_low':effective_low,'effective_distance_pct':dist,'effective_sessions':sessions}
 
-def update_signal(db,sp,stock,state=None):
-    b=latest_borrow(db,stock.id); sig=db.scalar(select(HuntSignal).where(HuntSignal.split_id==sp.id)); qualifies=(state or readiness_state(sp,b))['full']
+def update_signal(db,sp,stock,state=None,b=None):
+    b=b if b is not None else latest_borrow(db,stock.id); sig=db.scalar(select(HuntSignal).where(HuntSignal.split_id==sp.id)); qualifies=(state or readiness_state(sp,b))['full']
     if sig is None and qualifies:
         sig=HuntSignal(split_id=sp.id,stock_id=stock.id,ready_at=datetime.utcnow(),ready_price=sp.current_price,ready_low=sp.post_split_low,ready_available=b.available_shares,max_price_after_ready=sp.current_price,max_rise_pct=0.0); db.add(sig); db.flush()
     if sig is not None and sig.launched_at is None:
@@ -110,14 +117,20 @@ async def signals(db:Session=Depends(get_db)):
     latest={}
     for sp,s in rows:
         if s.symbol not in latest: latest[s.symbol]=(sp,s)
+    stock_ids=[s.id for sp,s in latest.values()]
+    borrows=latest_borrows(db,stock_ids)
+    bar_rows=db.execute(select(DailyBar.stock_id,DailyBar.trade_date,DailyBar.low).where(DailyBar.stock_id.in_(stock_ids),DailyBar.trade_date>=RANGE_START).order_by(DailyBar.stock_id,DailyBar.trade_date.asc())).all() if stock_ids else []
+    bars_by_stock={}
+    for sid,d,v in bar_rows: bars_by_stock.setdefault(sid,[]).append((d,v))
     live=await get_live_prices(latest.keys())
     states={}; low_dates={}
     for sp,s in latest.values():
-        states[s.symbol]=readiness_state(sp,latest_borrow(db,s.id),live.get(s.symbol)); update_signal(db,sp,s,states[s.symbol])
-        low_dates[s.symbol]=today if states[s.symbol]['new_low_today'] else low_formed_date(db,s.id,sp.effective_date,sp.post_split_low)
+        b=borrows.get(s.id); states[s.symbol]=readiness_state(sp,b,live.get(s.symbol)); update_signal(db,sp,s,states[s.symbol],b)
+        relevant=[(d,v) for d,v in bars_by_stock.get(s.id,[]) if d>=sp.effective_date]
+        low_dates[s.symbol]=today if states[s.symbol]['new_low_today'] else low_formed_date_from_rows(relevant,sp.post_split_low)
     db.commit(); db.expire_all()
     sig_by_stock={sig.stock_id:sig for sig in db.scalars(select(HuntSignal)).all()}; out=[]
     for sp,s in latest.values():
         sig=sig_by_stock.get(s.id); st=states[s.symbol]; launched=bool(sig and sig.launched_at is not None); ready=bool(sig and sig.launched_at is None and st['full'])
-        out.append({'symbol':s.symbol,'effective_date':sp.effective_date,'ready':ready,'near_ready':st['shortlist'] and not st['full'] and not launched,'shortlist':st['shortlist'] and not launched,'readiness_pct':100.0 if ready else st['readiness_pct'],'missing_count':st['missing_count'],'missing':st['missing'],'strength':st['strength'],'new_low_today':st['new_low_today'],'effective_low':st['effective_low'],'effective_low_date':low_dates[s.symbol],'effective_distance_pct':st['effective_distance_pct'],'effective_sessions':st['effective_sessions'],'launched':launched,'ready_at':sig.ready_at if sig else None,'ready_price':sig.ready_price if sig else None,'launched_at':sig.launched_at if sig else None,'launch_price':sig.launch_price if sig else None,'rise_pct':sig.max_rise_pct if sig else None,'max_price_after_ready':sig.max_price_after_ready if sig else None})
+        out.append({'symbol':s.symbol,'effective_date':sp.effective_date,'ready':ready,'near_ready':st['shortlist'] and not st['full'] and not launched,'shortlist':st['shortlist'] and not launched,'readiness_pct':100.0 if ready else st['readiness_pct'],'missing_count':st['missing_count'],'missing':st['missing'],'strength':st['strength'],'half_ok':st['half_ok'],'available_ok':st['available_ok'],'distance_ok':st['distance_ok'],'sessions_ok':st['sessions_ok'],'new_low_today':st['new_low_today'],'effective_low':st['effective_low'],'effective_low_date':low_dates[s.symbol],'effective_distance_pct':st['effective_distance_pct'],'effective_sessions':st['effective_sessions'],'launched':launched,'ready_at':sig.ready_at if sig else None,'ready_price':sig.ready_price if sig else None,'launched_at':sig.launched_at if sig else None,'launch_price':sig.launch_price if sig else None,'rise_pct':sig.max_rise_pct if sig else None,'max_price_after_ready':sig.max_price_after_ready if sig else None})
     kick_launch_refresh(); return out
