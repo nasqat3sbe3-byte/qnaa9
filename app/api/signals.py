@@ -1,7 +1,7 @@
 from datetime import date, datetime
 import asyncio
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models import BorrowSnapshot, DailyBar, HuntSignal, Split, Stock
@@ -29,11 +29,9 @@ def latest_borrow(db, stock_id):
 
 def latest_borrows(db, stock_ids):
     if not stock_ids: return {}
-    rows=db.scalars(select(BorrowSnapshot).where(BorrowSnapshot.stock_id.in_(stock_ids)).order_by(BorrowSnapshot.stock_id,BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc())).all()
-    out={}
-    for b in rows:
-        if b.stock_id not in out: out[b.stock_id]=b
-    return out
+    ranked=select(BorrowSnapshot.id.label('id'),func.row_number().over(partition_by=BorrowSnapshot.stock_id,order_by=(BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc())).label('rn')).where(BorrowSnapshot.stock_id.in_(stock_ids)).subquery()
+    rows=db.scalars(select(BorrowSnapshot).join(ranked,BorrowSnapshot.id==ranked.c.id).where(ranked.c.rn==1)).all()
+    return {b.stock_id:b for b in rows}
 
 def highest_after(db, stock_id, ready_at, fallback):
     d=ready_at.date(); highs=db.scalars(select(DailyBar.high).where(DailyBar.stock_id==stock_id,DailyBar.trade_date>d)).all()
