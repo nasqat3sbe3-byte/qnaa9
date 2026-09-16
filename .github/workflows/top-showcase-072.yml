@@ -1,0 +1,32 @@
+name: TOP Showcase UI
+on:
+  push:
+    paths:
+      - '.github/workflows/top-showcase-072.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch TOP presentation only
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('app/main.py')
+          s=p.read_text()
+          s=s.replace('🏆 +40%</button>','👑 TOP</button>')
+          s=s.replace('.pulse{color:#69e7ae;font-weight:900}', '.pulse{color:#69e7ae;font-weight:900}.topshow{display:none}.topshow.on{display:block;padding:18px 0 28px}.toph{padding:18px 12px 22px;text-align:center}.toph .crown{font-size:28px}.toph h2{margin:4px 0;font-size:26px;color:#e8c878;letter-spacing:2px}.toph p{margin:0;color:#8d8268;font-size:10px}.topgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}.topcard{position:relative;overflow:hidden;min-height:160px;padding:20px;border:1px solid #5d4b29;border-radius:18px;background:radial-gradient(circle at 20% 0%,#332817 0,#11100d 35%,#080b0d 75%);box-shadow:inset 0 1px 0 #8d724044,0 12px 30px #0008;cursor:pointer}.topcard:before{content:"";position:absolute;inset:0;background:linear-gradient(125deg,transparent 25%,#d8b46810 50%,transparent 72%);pointer-events:none}.toprank{position:absolute;left:14px;top:12px;color:#bca065;font-size:11px;font-weight:900}.toprank.first{font-size:20px}.topsym{font-size:30px;font-weight:950;letter-spacing:1px}.topco{font-size:9px;color:#766f61;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:75%}.toprise{margin-top:20px;font-size:34px;line-height:1;color:#e5bd62;font-weight:950;text-shadow:0 0 22px #d8b4682b}.toplabel{margin-top:7px;color:#746c5d;font-size:9px}.topcard:nth-child(1){border-color:#b9964c;box-shadow:inset 0 1px 0 #d6b86c66,0 14px 38px #000b,0 0 28px #b88a2817}.topcard:nth-child(1) .topsym{color:#f2d17d}.topcard:nth-child(1) .toprise{font-size:40px}')
+          old="function render(){let a=filtered();rows.innerHTML=a.map(row).join('');cards.innerHTML=a.map(card).join('')||'<div>لا توجد نتائج</div>'}"
+          new="function topCard(x,i){let s=x.signal||{},r=Number(s.rise_pct||0);return `<div class=\"topcard\" onclick=\"openD('${x.symbol}')\"><div class=\"toprank ${i===0?'first':''}\">${i===0?'👑 #1':'#'+(i+1)}</div><div class=\"topsym\">${x.symbol}</div><div class=\"topco\">${x.company||''}</div><div class=\"toprise\">+${r.toFixed(1)}%</div><div class=\"toplabel\">نسبة الانطلاقة · اضغط لعرض التفاصيل</div></div>`}function render(){let a=filtered(),isTop=filter==='launched';document.querySelector('.tablebox').style.display=isTop?'none':'';document.querySelector('.mobile').style.display=isTop?'none':'';let ts=document.getElementById('topshow');if(!ts){ts=document.createElement('div');ts.id='topshow';ts.className='topshow';document.querySelector('.tablebox').before(ts)}ts.classList.toggle('on',isTop);if(isTop){ts.innerHTML=`<div class=\"toph\"><div class=\"crown\">👑</div><h2>TOP · نخبة القنص</h2><p>الأسهم التي حققت +40% فأكثر</p></div><div class=\"topgrid\">${a.map(topCard).join('')||'<div>لا توجد نتائج</div>'}</div>`;return}rows.innerHTML=a.map(row).join('');cards.innerHTML=a.map(card).join('')||'<div>لا توجد نتائج</div>'}"
+          if old not in s: raise SystemExit('render target not found')
+          s=s.replace(old,new)
+          p.write_text(s)
+      - name: Commit UI
+        run: |
+          git config user.name "qanas-ui-bot"
+          git config user.email "qanas-ui-bot@users.noreply.github.com"
+          git add app/main.py
+          git commit -m "Style TOP as elite showcase" || exit 0
+          git push
