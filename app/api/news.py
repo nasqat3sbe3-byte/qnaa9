@@ -18,6 +18,29 @@ def tone(title):
     if pos: return "positive"
     return "neutral"
 
+def arabic_summary(form, body, tone_value):
+    t=(body or "").lower()
+    labels=[
+      ("at-the-market","برنامج بيع أسهم بالسوق (ATM)"),("registered direct","طرح مباشر مسجل"),
+      ("private placement","طرح خاص"),("public offering","طرح عام للأسهم"),("offering","طرح أوراق مالية"),
+      ("warrant","إصدار أو ممارسة Warrants"),("delisting","إشعار متعلق بالشطب"),
+      ("non-compliance","عدم امتثال لمتطلبات الإدراج"),("noncompliance","عدم امتثال لمتطلبات الإدراج"),
+      ("going concern","تنبيه حول الاستمرارية المالية"),("bankruptcy","إفلاس أو إجراء متعلق بالإفلاس"),
+      ("chapter 11","إجراء Chapter 11"),("contract","عقد أو اتفاقية جديدة"),
+      ("partnership","شراكة أو تعاون"),("approval","موافقة تنظيمية"),("patent","براءة اختراع")
+    ]
+    label=next((ar for en,ar in labels if en in t),None)
+    if not label:
+        if form in {"S-1","S-3","F-1","F-3","424B3","424B4","424B5","EFFECT","S-1/A","S-3/A","F-1/A","F-3/A"}: label="إفصاح تمويلي أو تسجيل أوراق مالية"
+        elif form in {"6-K","8-K"}: label="إفصاح جديد من الشركة"
+        else: label="إفصاح SEC جديد"
+    nums=[]
+    m=re.search(r'(?:price|priced)[^$]{0,80}\$\s*([0-9]+(?:\.[0-9]+)?)',body or "",re.I)
+    if m: nums.append("بسعر $"+m.group(1))
+    m=re.search(r'([0-9][0-9,]*(?:\.[0-9]+)?)\s+(?:shares|ordinary shares|common shares)',body or "",re.I)
+    if m: nums.append("بعدد "+m.group(1)+" سهم")
+    return label+(" · "+" · ".join(nums) if nums else "")
+
 def _published_date(value):
     try: return datetime.fromisoformat((value or "").replace("Z","+00:00")).date()
     except Exception: return None
@@ -59,7 +82,7 @@ async def _company_filings(symbol,start):
             except Exception:pass
             t=tone(body)
             if form in {"S-1","S-1/A","S-3","S-3/A","F-1","F-1/A","F-3","F-3/A","424B3","424B4","424B5","EFFECT"} and t=="neutral":t="negative"
-            out.append({"symbol":symbol,"title":form+" · SEC filing","published_at":z["filingDate"][i],"url":url,"source":"SEC","tone":t,"form":form})
+            out.append({"symbol":symbol,"title":form+" · SEC filing","summary_ar":arabic_summary(form,body,t),"published_at":z["filingDate"][i],"url":url,"source":"SEC","tone":t,"form":form})
         _COMPANY_CACHE[key]={"at":now,"items":out}
         return out
 
