@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
-from ..models import BorrowSnapshot, DailyBar, FourHourBar, Split, Stock, SyncRun
+from ..models import BorrowSnapshot, DailyBar, FourHourBar, Split, Stock, SyncRun, HuntSignal
 from ..providers.ibkr import fetch_borrow_snapshot
 from ..providers.ibkr_ftp import probe_ibkr_ftp
 from ..services.metrics import refresh_split_metrics
@@ -117,6 +117,14 @@ def borrow_history(symbol:str,limit:int=100,db:Session=Depends(get_db)):
     symbol=symbol.upper().strip();stock=db.scalar(select(Stock).where(Stock.symbol==symbol))
     if not stock:raise HTTPException(status_code=404,detail="symbol not found")
     limit=max(1,min(limit,1000));rows=db.scalars(select(BorrowSnapshot).where(BorrowSnapshot.stock_id==stock.id).order_by(BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc()).limit(limit)).all();return [{"timestamp":r.ts,"available":r.available_shares,"ctb":r.fee_rate,"fee_rate":r.fee_rate,"rebate_rate":r.rebate_rate,"source":r.source} for r in rows]
+
+@router.get("/lab-stats")
+def lab_stats(db:Session=Depends(get_db)):
+    rows=db.scalars(select(HuntSignal).order_by(HuntSignal.ready_at.desc())).all()
+    total=len(rows); launched=sum(1 for r in rows if r.launched_at is not None)
+    return {"ready_cycles":total,"launched_cycles":launched,"observed_launch_rate_pct":round(launched/total*100,1) if total else None,
+      "recent":[{"stock_id":r.stock_id,"ready_at":r.ready_at,"ready_price":r.ready_price,"ready_available":r.ready_available,"launched_at":r.launched_at,"max_rise_pct":r.max_rise_pct} for r in rows[:30]],
+      "note":"Observed historical journal only; not a prediction."}
 
 @router.get("/events")
 def events(limit:int=40,db:Session=Depends(get_db)):
