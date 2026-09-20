@@ -61,16 +61,6 @@ class BorrowSnapshot(Base):
     rebate_rate: Mapped[float | None] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(64))
 
-class BorrowRecent(Base):
-    __tablename__ = "borrow_recent"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
-    ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
-    available_shares: Mapped[float | None] = mapped_column(Float)
-    fee_rate: Mapped[float | None] = mapped_column(Float)
-    rebate_rate: Mapped[float | None] = mapped_column(Float)
-    source: Mapped[str] = mapped_column(String(64))
-
 class HuntSignal(Base):
     __tablename__ = "hunt_signals"
     id: Mapped[int] = mapped_column(primary_key=True)
