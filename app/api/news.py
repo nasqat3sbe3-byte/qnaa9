@@ -1,17 +1,31 @@
 from fastapi import APIRouter
 import time, re
+from datetime import date, datetime, timedelta, timezone
 import httpx
 
 router=APIRouter()
-_CACHE={"at":0,"positive":[],"negative":[]}
+_CACHE={"at":0,"positive":[],"negative":[],"neutral":[],"mixed":[]}
 POS=("contract","award","approval","approved","partnership","partner","collaboration","acquisition","merger","license","milestone","successful","launch","order","agreement","patent","clearance")
-NEG=("offering","registered direct","private placement","bankruptcy","delisting","deficiency","reverse split","warrant exercise","going concern","default","dilution","noncompliance","non-compliance","chapter 11")
+NEG=("offering","registered direct","private placement","bankruptcy","delisting","deficiency","reverse split","warrant exercise","going concern","default","dilution","noncompliance","non-compliance","chapter 11","at-the-market","atm offering")
 
 def tone(title):
     t=(title or "").lower()
-    if any(w in t for w in NEG): return "negative"
-    if any(w in t for w in POS): return "positive"
+    pos=any(w in t for w in POS); neg=any(w in t for w in NEG)
+    if pos and neg: return "mixed"
+    if neg: return "negative"
+    if pos: return "positive"
     return "neutral"
+
+def _published_date(value):
+    try: return datetime.fromisoformat((value or "").replace("Z","+00:00")).date()
+    except Exception: return None
+
+def _window_start(split_date=None):
+    sixty=date.today()-timedelta(days=60)
+    if not split_date: return sixty
+    try: sd=date.fromisoformat(str(split_date)[:10])
+    except Exception: return sixty
+    return max(sixty,sd)
 
 async def _load():
     global _CACHE
@@ -22,7 +36,7 @@ async def _load():
     try:
         async with httpx.AsyncClient(timeout=6,headers=headers) as c:
             r=await c.get(url); r.raise_for_status(); txt=r.text
-        positive=[]; negative=[]
+        positive=[]; negative=[]; neutral=[]; mixed=[]
         for e in re.findall(r"<entry>(.*?)</entry>",txt,re.S):
             tm=re.search(r"<title[^>]*>(.*?)</title>",e,re.S)
             title=re.sub(r"<[^>]+>"," ",tm.group(1) if tm else "")
@@ -32,11 +46,13 @@ async def _load():
             lm=re.search(r'href="([^"]+)"',e); um=re.search(r"<updated>(.*?)</updated>",e,re.S)
             item={"symbol":m.group(1),"title":title,"published_at":um.group(1) if um else "","url":lm.group(1) if lm else "","source":"SEC"}
             t=tone(title)
-            if t=="positive": positive.append({**item,"positive":True})
-            elif t=="negative": negative.append({**item,"negative":True})
-        _CACHE={"at":now,"positive":positive,"negative":negative}
+            if t=="positive": positive.append({**item,"tone":"positive","positive":True})
+            elif t=="negative": negative.append({**item,"tone":"negative","negative":True})
+            elif t=="mixed": mixed.append({**item,"tone":"mixed"})
+            else: neutral.append({**item,"tone":"neutral"})
+        _CACHE={"at":now,"positive":positive,"negative":negative,"neutral":neutral,"mixed":mixed}
     except Exception:
-        if not _CACHE["at"]: _CACHE={"at":now,"positive":[],"negative":[]}
+        if not _CACHE["at"]: _CACHE={"at":now,"positive":[],"negative":[],"neutral":[],"mixed":[]}
     return _CACHE
 
 @router.get("/news-positive")
@@ -51,3 +67,25 @@ async def news_negative():
 async def news_radar():
     c=await _load()
     return {"positive":c["positive"],"negative":c["negative"]}
+
+
+@router.get("/news-context/{symbol}")
+async def news_context(symbol:str, split_date:str|None=None):
+    symbol=symbol.upper().strip()
+    c=await _load(); start=_window_start(split_date)
+    items=[]
+    for bucket in ("negative","positive","mixed","neutral"):
+        for x in c.get(bucket,[]):
+            if x.get("symbol")!=symbol: continue
+            pd=_published_date(x.get("published_at"))
+            if pd and pd < start: continue
+            items.append(x)
+    items.sort(key=lambda x:x.get("published_at") or "",reverse=True)
+    counts={k:sum(1 for x in items if x.get("tone")==k) for k in ("positive","negative","mixed","neutral")}
+    if counts["negative"] and counts["positive"]: overall="mixed"
+    elif counts["negative"]: overall="negative"
+    elif counts["positive"]: overall="positive"
+    elif counts["mixed"]: overall="mixed"
+    elif items: overall="neutral"
+    else: overall="none"
+    return {"symbol":symbol,"window_start":start.isoformat(),"window_end":date.today().isoformat(),"overall":overall,"counts":counts,"items":items,"note":"SEC current 8-K feed headline classification; informational only and does not change readiness."}
