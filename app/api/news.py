@@ -5,6 +5,8 @@ import httpx
 
 router=APIRouter()
 _CACHE={"at":0,"positive":[],"negative":[],"neutral":[],"mixed":[]}
+_COMPANY_CACHE={}
+_TICKERS={"at":0,"map":{}}
 POS=("contract","award","approval","approved","partnership","partner","collaboration","acquisition","merger","license","milestone","successful","launch","order","agreement","patent","clearance")
 NEG=("prospectus","at-the-market","atm offering","offering","registered direct","private placement","bankruptcy","delisting","deficiency","reverse split","warrant exercise","going concern","default","dilution","noncompliance","non-compliance","chapter 11","at-the-market","atm offering")
 
@@ -29,10 +31,16 @@ def _window_start(split_date=None):
 
 SEC_FORMS={"S-1","S-1/A","S-3","S-3/A","F-1","F-1/A","F-3","F-3/A","424B3","424B4","424B5","EFFECT","6-K","8-K"}
 async def _company_filings(symbol,start):
+    global _TICKERS
+    key=(symbol,start.isoformat()); now=time.time()
+    hit_cache=_COMPANY_CACHE.get(key)
+    if hit_cache and now-hit_cache["at"]<600:return hit_cache["items"]
     headers={"User-Agent":"Qanas market research admin@qanas.local"}
     async with httpx.AsyncClient(timeout=10,headers=headers,follow_redirects=True) as c:
-        r=await c.get("https://www.sec.gov/files/company_tickers.json"); r.raise_for_status()
-        hit=next((v for v in r.json().values() if str(v.get("ticker","")).upper()==symbol),None)
+        if now-_TICKERS["at"]>21600 or not _TICKERS["map"]:
+            r=await c.get("https://www.sec.gov/files/company_tickers.json"); r.raise_for_status()
+            _TICKERS={"at":now,"map":{str(v.get("ticker","")).upper():v for v in r.json().values()}}
+        hit=_TICKERS["map"].get(symbol)
         if not hit:return []
         cik=str(hit["cik_str"]).zfill(10)
         r=await c.get("https://data.sec.gov/submissions/CIK"+cik+".json"); r.raise_for_status()
@@ -52,6 +60,7 @@ async def _company_filings(symbol,start):
             t=tone(body)
             if form in {"S-1","S-1/A","S-3","S-3/A","F-1","F-1/A","F-3","F-3/A","424B3","424B4","424B5","EFFECT"} and t=="neutral":t="negative"
             out.append({"symbol":symbol,"title":form+" · SEC filing","published_at":z["filingDate"][i],"url":url,"source":"SEC","tone":t,"form":form})
+        _COMPANY_CACHE[key]={"at":now,"items":out}
         return out
 
 async def _load():
@@ -117,3 +126,14 @@ async def news_context(symbol:str, split_date:str|None=None):
     elif items: overall="neutral"
     else: overall="none"
     return {"symbol":symbol,"window_start":start.isoformat(),"window_end":date.today().isoformat(),"overall":overall,"counts":counts,"items":items,"note":"SEC company filings plus filing-content classification; informational only and does not change readiness."}
+
+
+@router.get("/news-context-batch")
+async def news_context_batch(symbols:str="",split_dates:str=""):
+    syms=[x.strip().upper() for x in symbols.split(",") if x.strip()][:250]
+    dates=[x.strip() for x in split_dates.split(",")]
+    out={}
+    for i,sym in enumerate(syms):
+        sd=dates[i] if i<len(dates) else None
+        out[sym]=await news_context(sym,sd)
+    return out
