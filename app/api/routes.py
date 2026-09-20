@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
-from ..models import BorrowSnapshot, DailyBar, FourHourBar, Split, Stock, SyncRun
+from ..models import BorrowSnapshot, BorrowRecent, DailyBar, FourHourBar, Split, Stock, SyncRun
 from ..providers.ibkr import fetch_borrow_snapshot
 from ..providers.ibkr_ftp import probe_ibkr_ftp
 from ..services.metrics import refresh_split_metrics
@@ -72,7 +72,7 @@ async def run_borrow_sync():
                 symbol,snap,err=await task;sp,stock=targets[symbol];BORROW_SYNC_STATUS["processed"]+=1;run.processed+=1
                 if err:BORROW_SYNC_STATUS["errors"].append({"symbol":symbol,"error":err[:180]})
                 elif not snap:BORROW_SYNC_STATUS["not_found"]+=1;run.not_found+=1;BORROW_SYNC_STATUS["errors"].append({"symbol":symbol,"error":"borrow data not found"})
-                else:db.add(BorrowSnapshot(stock_id=stock.id,ts=datetime.utcnow(),available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"]));db.flush();BORROW_SYNC_STATUS["saved"]+=1;run.saved+=1;refresh_split_metrics(db,sp)
+                else:\n                    now=datetime.utcnow();db.add(BorrowSnapshot(stock_id=stock.id,ts=now,available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"]));db.add(BorrowRecent(stock_id=stock.id,ts=now,available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"]));db.flush();old_ids=db.scalars(select(BorrowRecent.id).where(BorrowRecent.stock_id==stock.id).order_by(BorrowRecent.id.desc()).offset(20)).all();\n                    if old_ids:db.query(BorrowRecent).filter(BorrowRecent.id.in_(old_ids)).delete(synchronize_session=False)\n                    BORROW_SYNC_STATUS["saved"]+=1;run.saved+=1;refresh_split_metrics(db,sp)
                 run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:200]);db.commit()
         run.running=False;run.finished_at=datetime.utcnow();run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:200]);db.commit();BORROW_SYNC_STATUS["last_finished"]=run.finished_at.isoformat()
     except Exception as exc:
@@ -109,9 +109,15 @@ async def sync_borrow_symbol(symbol:str,db:Session=Depends(get_db)):
     if not stock:raise HTTPException(status_code=404,detail="symbol not found")
     snapshot=await fetch_borrow_snapshot(symbol)
     if not snapshot:raise HTTPException(status_code=404,detail="borrow data not found")
-    row=BorrowSnapshot(stock_id=stock.id,ts=datetime.utcnow(),available_shares=snapshot["available_shares"],fee_rate=snapshot["fee_rate"],rebate_rate=snapshot["rebate_rate"],source=snapshot["source"]);db.add(row);db.flush();sp=db.scalar(select(Split).where(Split.stock_id==stock.id).order_by(Split.effective_date.desc(),Split.id.desc()).limit(1))
+    now=datetime.utcnow();row=BorrowSnapshot(stock_id=stock.id,ts=now,available_shares=snapshot["available_shares"],fee_rate=snapshot["fee_rate"],rebate_rate=snapshot["rebate_rate"],source=snapshot["source"]);db.add(row);db.add(BorrowRecent(stock_id=stock.id,ts=now,available_shares=snapshot["available_shares"],fee_rate=snapshot["fee_rate"],rebate_rate=snapshot["rebate_rate"],source=snapshot["source"]));db.flush();sp=db.scalar(select(Split).where(Split.stock_id==stock.id).order_by(Split.effective_date.desc(),Split.id.desc()).limit(1))
     if sp:refresh_split_metrics(db,sp)
     db.commit();return {"symbol":symbol,"available":row.available_shares,"ctb":row.fee_rate,"fee_rate":row.fee_rate,"rebate_rate":row.rebate_rate,"source":row.source,"timestamp":row.ts,"source_reported_at":snapshot.get("reported_at"),"exchange":snapshot.get("exchange")}
+@router.get("/borrow/{symbol}/recent")
+def borrow_recent(symbol:str,limit:int=15,db:Session=Depends(get_db)):
+    symbol=symbol.upper().strip();stock=db.scalar(select(Stock).where(Stock.symbol==symbol))
+    if not stock:raise HTTPException(status_code=404,detail="symbol not found")
+    limit=max(1,min(limit,20));rows=db.scalars(select(BorrowRecent).where(BorrowRecent.stock_id==stock.id).order_by(BorrowRecent.id.desc()).limit(limit)).all()
+    return [{"timestamp":r.ts,"available":r.available_shares,"ctb":r.fee_rate,"rebate_rate":r.rebate_rate,"source":r.source} for r in rows]
 @router.get("/borrow/{symbol}/history")
 def borrow_history(symbol:str,limit:int=100,db:Session=Depends(get_db)):
     symbol=symbol.upper().strip();stock=db.scalar(select(Stock).where(Stock.symbol==symbol))
