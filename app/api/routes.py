@@ -117,6 +117,32 @@ def borrow_history(symbol:str,limit:int=100,db:Session=Depends(get_db)):
     symbol=symbol.upper().strip();stock=db.scalar(select(Stock).where(Stock.symbol==symbol))
     if not stock:raise HTTPException(status_code=404,detail="symbol not found")
     limit=max(1,min(limit,1000));rows=db.scalars(select(BorrowSnapshot).where(BorrowSnapshot.stock_id==stock.id).order_by(BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc()).limit(limit)).all();return [{"timestamp":r.ts,"available":r.available_shares,"ctb":r.fee_rate,"fee_rate":r.fee_rate,"rebate_rate":r.rebate_rate,"source":r.source} for r in rows]
+
+@router.get("/events")
+def events(limit:int=40,db:Session=Depends(get_db)):
+    limit=max(1,min(limit,100)); out=[]
+    for sp,st in _latest_split_rows(db):
+        snaps=db.scalars(select(BorrowSnapshot).where(BorrowSnapshot.stock_id==st.id).order_by(BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc()).limit(2)).all()
+        if snaps:
+            cur=snaps[0]
+            if cur.available_shares==0: out.append({"symbol":st.symbol,"kind":"zero_short","at":cur.ts,"text":"Available وصل 0"})
+            if len(snaps)>1 and cur.available_shares is not None and snaps[1].available_shares is not None and cur.available_shares<snaps[1].available_shares:
+                out.append({"symbol":st.symbol,"kind":"borrow_drop","at":cur.ts,"text":f"Available {snaps[1].available_shares:g} → {cur.available_shares:g}"})
+        if sp.stability_sessions and sp.stability_sessions>=4:
+            out.append({"symbol":st.symbol,"kind":"stable","at":datetime.combine(sp.last_low_date or sp.effective_date,datetime.min.time()),"text":"ثبات 4 جلسات"})
+    out.sort(key=lambda x:x["at"] or datetime.min,reverse=True)
+    return out[:limit]
+
+@router.get("/borrow-trends")
+def borrow_trends(db:Session=Depends(get_db)):
+    out={}
+    for sp,st in _latest_split_rows(db):
+        rows=db.scalars(select(BorrowSnapshot).where(BorrowSnapshot.stock_id==st.id).order_by(BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc()).limit(8)).all()
+        if not rows:continue
+        vals=[{"at":r.ts,"available":r.available_shares} for r in reversed(rows)]
+        out[st.symbol]={"history":vals,"just_zero":len(rows)>1 and rows[0].available_shares==0 and rows[1].available_shares!=0}
+    return out
+
 @router.get("/splits")
 def splits(db:Session=Depends(get_db)):
     rows=_latest_split_rows(db,include_future=True);rows.sort(key=lambda x:(x[0].effective_date,x[1].symbol),reverse=True);return [_split_payload(db,sp,s) for sp,s in rows]
