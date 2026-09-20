@@ -23,7 +23,6 @@ function scanEvents(){
     if(p.av!=null&&av!=null&&av<p.av)addEvent(x.symbol,'📉 Available '+fmt(p.av)+' → '+fmt(av));
     if(p.se!=null&&se>=4&&p.se<4)addEvent(x.symbol,'🎯 أكمل 4 جلسات ثبات');
     if(!p.rd&&rd)addEvent(x.symbol,'🎯 دخل الأجهز');
-    if(!p.ln&&ln)addEvent(x.symbol,'👑 حقق +40% ودخل TOP');
     if(g?.fresh&&!p.ig)addEvent(x.symbol,'⚡ بدأ يتحرك +'+g.pct.toFixed(1)+'%');
     eventState[x.symbol]={av,se,rd,ln,ig:!!g?.fresh}
   });renderEvents()
