@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
-from ..models import BorrowSnapshot, DailyBar, FourHourBar, Split, Stock, SyncRun, HuntSignal
+from ..models import BorrowSnapshot, DailyBar, FourHourBar, Split, Stock, SyncRun
 from ..providers.ibkr import fetch_borrow_snapshot
 from ..providers.ibkr_ftp import probe_ibkr_ftp
 from ..services.metrics import refresh_split_metrics
@@ -29,11 +29,6 @@ def _four_hour_stats(db,stock_id,effective_date):
     best=max(bars,key=lambda b:((b.high/b.open)-1)*100); return {"four_hour_highest_rise_pct":round(((best.high/best.open)-1)*100,2),"four_hour_highest_rise_open":best.open,"four_hour_highest_rise_high":best.high,"four_hour_highest_rise_time":best.bar_time.isoformat(),"four_hour_highest_price":max(b.high for b in bars),"four_hour_source":best.source}
 
 def _latest_borrow(db,stock_id):return db.scalar(select(BorrowSnapshot).where(BorrowSnapshot.stock_id==stock_id).order_by(BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc()).limit(1))
-def _latest_borrow_map(db,stock_ids):
-    if not stock_ids:return {}
-    sub=(select(BorrowSnapshot.stock_id,func.max(BorrowSnapshot.id).label("max_id")).where(BorrowSnapshot.stock_id.in_(stock_ids)).group_by(BorrowSnapshot.stock_id).subquery())
-    rows=db.scalars(select(BorrowSnapshot).join(sub,BorrowSnapshot.id==sub.c.max_id)).all()
-    return {r.stock_id:r for r in rows}
 def _latest_split_rows(db,include_future=False):
     today=date.today();q=select(Split,Stock).join(Stock,Stock.id==Split.stock_id).where(Split.effective_date>=RANGE_START,Split.effective_date<=RANGE_END)
     if not include_future:q=q.where(Split.effective_date<=today)
@@ -122,40 +117,6 @@ def borrow_history(symbol:str,limit:int=100,db:Session=Depends(get_db)):
     symbol=symbol.upper().strip();stock=db.scalar(select(Stock).where(Stock.symbol==symbol))
     if not stock:raise HTTPException(status_code=404,detail="symbol not found")
     limit=max(1,min(limit,1000));rows=db.scalars(select(BorrowSnapshot).where(BorrowSnapshot.stock_id==stock.id).order_by(BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc()).limit(limit)).all();return [{"timestamp":r.ts,"available":r.available_shares,"ctb":r.fee_rate,"fee_rate":r.fee_rate,"rebate_rate":r.rebate_rate,"source":r.source} for r in rows]
-
-@router.get("/lab-stats")
-def lab_stats(db:Session=Depends(get_db)):
-    rows=db.scalars(select(HuntSignal).order_by(HuntSignal.ready_at.desc())).all()
-    total=len(rows); launched=sum(1 for r in rows if r.launched_at is not None)
-    return {"ready_cycles":total,"launched_cycles":launched,"observed_launch_rate_pct":round(launched/total*100,1) if total else None,
-      "recent":[{"stock_id":r.stock_id,"ready_at":r.ready_at,"ready_price":r.ready_price,"ready_available":r.ready_available,"launched_at":r.launched_at,"max_rise_pct":r.max_rise_pct} for r in rows[:30]],
-      "note":"Observed historical journal only; not a prediction."}
-
-@router.get("/events")
-def events(limit:int=40,db:Session=Depends(get_db)):
-    limit=max(1,min(limit,100)); out=[]
-    for sp,st in _latest_split_rows(db):
-        snaps=db.scalars(select(BorrowSnapshot).where(BorrowSnapshot.stock_id==st.id).order_by(BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc()).limit(2)).all()
-        if snaps:
-            cur=snaps[0]
-            if cur.available_shares==0: out.append({"symbol":st.symbol,"kind":"zero_short","at":cur.ts,"text":"Available وصل 0"})
-            if len(snaps)>1 and cur.available_shares is not None and snaps[1].available_shares is not None and cur.available_shares<snaps[1].available_shares:
-                out.append({"symbol":st.symbol,"kind":"borrow_drop","at":cur.ts,"text":f"Available {snaps[1].available_shares:g} → {cur.available_shares:g}"})
-        if sp.stability_sessions and sp.stability_sessions>=4:
-            out.append({"symbol":st.symbol,"kind":"stable","at":datetime.combine(sp.last_low_date or sp.effective_date,datetime.min.time()),"text":"ثبات 4 جلسات"})
-    out.sort(key=lambda x:x["at"] or datetime.min,reverse=True)
-    return out[:limit]
-
-@router.get("/borrow-trends")
-def borrow_trends(db:Session=Depends(get_db)):
-    out={}
-    for sp,st in _latest_split_rows(db):
-        rows=db.scalars(select(BorrowSnapshot).where(BorrowSnapshot.stock_id==st.id).order_by(BorrowSnapshot.ts.desc(),BorrowSnapshot.id.desc()).limit(8)).all()
-        if not rows:continue
-        vals=[{"at":r.ts,"available":r.available_shares} for r in reversed(rows)]
-        out[st.symbol]={"history":vals,"just_zero":len(rows)>1 and rows[0].available_shares==0 and rows[1].available_shares!=0}
-    return out
-
 @router.get("/splits")
 def splits(db:Session=Depends(get_db)):
     rows=_latest_split_rows(db,include_future=True);rows.sort(key=lambda x:(x[0].effective_date,x[1].symbol),reverse=True);return [_split_payload(db,sp,s) for sp,s in rows]
@@ -166,10 +127,4 @@ def stock_detail(symbol:str,db:Session=Depends(get_db)):
     sp,s=row;return _split_payload(db,sp,s)
 @router.get("/hunt")
 def hunt(db:Session=Depends(get_db)):
-    rows=_latest_split_rows(db); bmap=_latest_borrow_map(db,[st.id for _,st in rows])
-    rows.sort(key=lambda x:_progressive_score(x[0],bmap.get(x[1].id)),reverse=True)
-    out=[]
-    for sp,st in rows:
-        b=bmap.get(st.id);score=_progressive_score(sp,b)
-        out.append({"symbol":st.symbol,"company":st.company_name,"effective_date":sp.effective_date,"status":sp.status,"post_split_open":sp.post_split_open,"post_split_high":sp.post_split_high,"post_split_low":sp.post_split_low,"current_price":sp.current_price,"distance_from_low_pct":sp.distance_from_low_pct,"stability_sessions":sp.stability_sessions,"half_level":sp.half_level,"half_level_reached":sp.half_level_reached,"ready_score":score,"available":b.available_shares if b else None,"ctb":b.fee_rate if b else None,"fee_rate":b.fee_rate if b else None,"rebate_rate":b.rebate_rate if b else None,"borrow_timestamp":b.ts if b else None})
-    return out
+    rows=_latest_split_rows(db);rows.sort(key=lambda x:_progressive_score(x[0],_latest_borrow(db,x[1].id)),reverse=True);return [_split_payload(db,sp,s) for sp,s in rows]
