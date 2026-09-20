@@ -17,7 +17,6 @@ from .hunt_signals import router as hunt_signals_router
 router = APIRouter(); router.include_router(hunt_signals_router)
 RANGE_START=date(2026,5,1); RANGE_END=date(2026,9,30)
 BORROW_SYNC_STATUS={"running":False,"processed":0,"total":0,"saved":0,"not_found":0,"errors":[],"last_finished":None}; BORROW_SYNC_CONCURRENCY=32
-BORROW_RECENT_CACHE={}
 
 def get_db():
     db=SessionLocal()
@@ -73,10 +72,7 @@ async def run_borrow_sync():
                 symbol,snap,err=await task;sp,stock=targets[symbol];BORROW_SYNC_STATUS["processed"]+=1;run.processed+=1
                 if err:BORROW_SYNC_STATUS["errors"].append({"symbol":symbol,"error":err[:180]})
                 elif not snap:BORROW_SYNC_STATUS["not_found"]+=1;run.not_found+=1;BORROW_SYNC_STATUS["errors"].append({"symbol":symbol,"error":"borrow data not found"})
-                else:
-                    now=datetime.utcnow();db.add(BorrowSnapshot(stock_id=stock.id,ts=now,available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"]));db.add(BorrowRecent(stock_id=stock.id,ts=now,available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"]));db.flush();old_ids=db.scalars(select(BorrowRecent.id).where(BorrowRecent.stock_id==stock.id).order_by(BorrowRecent.id.desc()).offset(20)).all();
-                    if old_ids:db.query(BorrowRecent).filter(BorrowRecent.id.in_(old_ids)).delete(synchronize_session=False)
-                    BORROW_SYNC_STATUS["saved"]+=1;run.saved+=1;refresh_split_metrics(db,sp)
+                else:db.add(BorrowSnapshot(stock_id=stock.id,ts=datetime.utcnow(),available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"]));db.flush();BORROW_SYNC_STATUS["saved"]+=1;run.saved+=1;refresh_split_metrics(db,sp)
                 run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:200]);db.commit()
         run.running=False;run.finished_at=datetime.utcnow();run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:200]);db.commit();BORROW_SYNC_STATUS["last_finished"]=run.finished_at.isoformat()
     except Exception as exc:
@@ -113,12 +109,9 @@ async def sync_borrow_symbol(symbol:str,db:Session=Depends(get_db)):
     if not stock:raise HTTPException(status_code=404,detail="symbol not found")
     snapshot=await fetch_borrow_snapshot(symbol)
     if not snapshot:raise HTTPException(status_code=404,detail="borrow data not found")
-    now=datetime.utcnow();row=BorrowSnapshot(stock_id=stock.id,ts=now,available_shares=snapshot["available_shares"],fee_rate=snapshot["fee_rate"],rebate_rate=snapshot["rebate_rate"],source=snapshot["source"]);db.add(row);db.flush();recent=BORROW_RECENT_CACHE.setdefault(symbol,[]);recent.insert(0,{"timestamp":now.isoformat(),"available":snapshot["available_shares"]});del recent[4:];sp=db.scalar(select(Split).where(Split.stock_id==stock.id).order_by(Split.effective_date.desc(),Split.id.desc()).limit(1))
+    row=BorrowSnapshot(stock_id=stock.id,ts=datetime.utcnow(),available_shares=snapshot["available_shares"],fee_rate=snapshot["fee_rate"],rebate_rate=snapshot["rebate_rate"],source=snapshot["source"]);db.add(row);db.flush();sp=db.scalar(select(Split).where(Split.stock_id==stock.id).order_by(Split.effective_date.desc(),Split.id.desc()).limit(1))
     if sp:refresh_split_metrics(db,sp)
     db.commit();return {"symbol":symbol,"available":row.available_shares,"ctb":row.fee_rate,"fee_rate":row.fee_rate,"rebate_rate":row.rebate_rate,"source":row.source,"timestamp":row.ts,"source_reported_at":snapshot.get("reported_at"),"exchange":snapshot.get("exchange")}
-@router.get("/borrow/{symbol}/recent")
-def borrow_recent(symbol:str):
-    return BORROW_RECENT_CACHE.get(symbol.upper().strip(),[])
 @router.get("/borrow/{symbol}/history")
 def borrow_history(symbol:str,limit:int=100,db:Session=Depends(get_db)):
     symbol=symbol.upper().strip();stock=db.scalar(select(Stock).where(Stock.symbol==symbol))
