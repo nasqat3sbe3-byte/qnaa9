@@ -6,7 +6,7 @@ import httpx
 router=APIRouter()
 _CACHE={"at":0,"positive":[],"negative":[],"neutral":[],"mixed":[]}
 POS=("contract","award","approval","approved","partnership","partner","collaboration","acquisition","merger","license","milestone","successful","launch","order","agreement","patent","clearance")
-NEG=("offering","registered direct","private placement","bankruptcy","delisting","deficiency","reverse split","warrant exercise","going concern","default","dilution","noncompliance","non-compliance","chapter 11","at-the-market","atm offering")
+NEG=("prospectus","at-the-market","atm offering","offering","registered direct","private placement","bankruptcy","delisting","deficiency","reverse split","warrant exercise","going concern","default","dilution","noncompliance","non-compliance","chapter 11","at-the-market","atm offering")
 
 def tone(title):
     t=(title or "").lower()
@@ -26,6 +26,33 @@ def _window_start(split_date=None):
     try: sd=date.fromisoformat(str(split_date)[:10])
     except Exception: return sixty
     return max(sixty,sd)
+
+SEC_FORMS={"S-1","S-1/A","S-3","S-3/A","F-1","F-1/A","F-3","F-3/A","424B3","424B4","424B5","EFFECT","6-K","8-K"}
+async def _company_filings(symbol,start):
+    headers={"User-Agent":"Qanas market research admin@qanas.local"}
+    async with httpx.AsyncClient(timeout=10,headers=headers,follow_redirects=True) as c:
+        r=await c.get("https://www.sec.gov/files/company_tickers.json"); r.raise_for_status()
+        hit=next((v for v in r.json().values() if str(v.get("ticker","")).upper()==symbol),None)
+        if not hit:return []
+        cik=str(hit["cik_str"]).zfill(10)
+        r=await c.get("https://data.sec.gov/submissions/CIK"+cik+".json"); r.raise_for_status()
+        z=r.json().get("filings",{}).get("recent",{}); out=[]
+        for i,form in enumerate(z.get("form",[])):
+            if i>=len(z.get("filingDate",[])):break
+            fd=_published_date(z["filingDate"][i])
+            if not fd or fd<start:continue
+            form=str(form).upper()
+            if form not in SEC_FORMS:continue
+            acc=z.get("accessionNumber",[])[i]; doc=z.get("primaryDocument",[])[i]
+            url="https://www.sec.gov/Archives/edgar/data/"+str(int(cik))+"/"+acc.replace("-","")+"/"+doc
+            body=""
+            try:
+                rr=await c.get(url); rr.raise_for_status(); body=re.sub(r"<[^>]+>"," ",rr.text); body=" ".join(body.split())[:100000]
+            except Exception:pass
+            t=tone(body)
+            if form in {"S-1","S-1/A","S-3","S-3/A","F-1","F-1/A","F-3","F-3/A","424B3","424B4","424B5","EFFECT"} and t=="neutral":t="negative"
+            out.append({"symbol":symbol,"title":form+" · SEC filing","published_at":z["filingDate"][i],"url":url,"source":"SEC","tone":t,"form":form})
+        return out
 
 async def _load():
     global _CACHE
@@ -73,7 +100,8 @@ async def news_radar():
 async def news_context(symbol:str, split_date:str|None=None):
     symbol=symbol.upper().strip()
     c=await _load(); start=_window_start(split_date)
-    items=[]
+    try: items=await _company_filings(symbol,start)
+    except Exception: items=[]
     for bucket in ("negative","positive","mixed","neutral"):
         for x in c.get(bucket,[]):
             if x.get("symbol")!=symbol: continue
@@ -88,4 +116,4 @@ async def news_context(symbol:str, split_date:str|None=None):
     elif counts["mixed"]: overall="mixed"
     elif items: overall="neutral"
     else: overall="none"
-    return {"symbol":symbol,"window_start":start.isoformat(),"window_end":date.today().isoformat(),"overall":overall,"counts":counts,"items":items,"note":"SEC current 8-K feed headline classification; informational only and does not change readiness."}
+    return {"symbol":symbol,"window_start":start.isoformat(),"window_end":date.today().isoformat(),"overall":overall,"counts":counts,"items":items,"note":"SEC company filings plus filing-content classification; informational only and does not change readiness."}
