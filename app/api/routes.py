@@ -72,7 +72,10 @@ async def run_borrow_sync():
                 symbol,snap,err=await task;sp,stock=targets[symbol];BORROW_SYNC_STATUS["processed"]+=1;run.processed+=1
                 if err:BORROW_SYNC_STATUS["errors"].append({"symbol":symbol,"error":err[:180]})
                 elif not snap:BORROW_SYNC_STATUS["not_found"]+=1;run.not_found+=1;BORROW_SYNC_STATUS["errors"].append({"symbol":symbol,"error":"borrow data not found"})
-                else:\n                    now=datetime.utcnow();db.add(BorrowSnapshot(stock_id=stock.id,ts=now,available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"]));db.add(BorrowRecent(stock_id=stock.id,ts=now,available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"]));db.flush();old_ids=db.scalars(select(BorrowRecent.id).where(BorrowRecent.stock_id==stock.id).order_by(BorrowRecent.id.desc()).offset(20)).all();\n                    if old_ids:db.query(BorrowRecent).filter(BorrowRecent.id.in_(old_ids)).delete(synchronize_session=False)\n                    BORROW_SYNC_STATUS["saved"]+=1;run.saved+=1;refresh_split_metrics(db,sp)
+                else:
+                    now=datetime.utcnow();db.add(BorrowSnapshot(stock_id=stock.id,ts=now,available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"]));db.add(BorrowRecent(stock_id=stock.id,ts=now,available_shares=snap["available_shares"],fee_rate=snap["fee_rate"],rebate_rate=snap["rebate_rate"],source=snap["source"]));db.flush();old_ids=db.scalars(select(BorrowRecent.id).where(BorrowRecent.stock_id==stock.id).order_by(BorrowRecent.id.desc()).offset(20)).all();
+                    if old_ids:db.query(BorrowRecent).filter(BorrowRecent.id.in_(old_ids)).delete(synchronize_session=False)
+                    BORROW_SYNC_STATUS["saved"]+=1;run.saved+=1;refresh_split_metrics(db,sp)
                 run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:200]);db.commit()
         run.running=False;run.finished_at=datetime.utcnow();run.errors_json=json.dumps(BORROW_SYNC_STATUS["errors"][:200]);db.commit();BORROW_SYNC_STATUS["last_finished"]=run.finished_at.isoformat()
     except Exception as exc:
