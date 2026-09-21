@@ -41,6 +41,8 @@ async def heartbeat_loop():
         await asyncio.sleep(10)
 
 async def fetch_direct_universe(client):
+    # Yield immediately so the web server can finish binding to :8080 first.
+    await asyncio.sleep(0)
     merged={}
     for url in SPLITS_URLS:
         r=await client.get(url,timeout=30); r.raise_for_status()
@@ -87,6 +89,8 @@ async def sync_universe(client):
     STATE["universe_error"]=last_error or "unknown"
 
 async def universe_loop():
+    # Keep Northflank ingress healthy before any external scraping starts.
+    await asyncio.sleep(15)
     headers={"User-Agent":"Mozilla/5.0 QanasWatcher/0.3"}
     async with httpx.AsyncClient(follow_redirects=True,headers=headers) as client:
         while True:
