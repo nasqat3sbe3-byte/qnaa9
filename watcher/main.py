@@ -10,7 +10,7 @@ import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI
 
-app = FastAPI(title="Qanas Watcher", version="0.3.0")
+app = FastAPI(title="Qanas Watcher", version="0.4.0")
 BOOTED_AT = datetime.now(timezone.utc)
 QANAS_WEB = "https://qnaa9.onrender.com"
 UNIVERSE_SEED = ["MSGY","WCT","NCT","EPOW","CPOP","LGCL","NRSN","HUBC","MGN","FGL","OMH","AIXI","SFWL","TNMG","LRHC","RCON","CXAI","YYAI","YXT","RBNE","CISS","IZM","GAUZ","LGHL","UCAR","HLSQ","ALP","GTBP","GOSS","JAGX","NFE","IPDN","NXXT","ENLV","STKH","TRIB","FFAI"]
@@ -29,6 +29,8 @@ UNIVERSE = {s:{"symbol":s,"effective_date":None,"source":"seed"} for s in UNIVER
 QUOTES = {}
 BORROW = {}
 EVENTS = []
+ANALYTICS = {}
+TRAIL = {}
 
 def utcnow(): return datetime.now(timezone.utc)
 def add_event(symbol, kind, text, data=None):
@@ -151,6 +153,69 @@ async def market_loop():
             STATE["market_cursor"]=nxt
             await asyncio.sleep(3)
 
+def score_row(available, distance, sessions):
+    if available is None: ap=0
+    elif available<=10000: ap=45
+    elif available<=20000: ap=45-15*((available-10000)/10000)
+    else: ap=0
+    if distance is None: dp=0
+    elif distance<=10: dp=30
+    elif distance<=20: dp=30-15*((distance-10)/10)
+    else: dp=0
+    sp=25 if sessions>=4 else 19 if sessions==3 else 12 if sessions==2 else 6 if sessions==1 else 0
+    return round(min(100,ap+dp+sp),1)
+
+def refresh_analytics():
+    now=time.time()
+    for sym,meta in UNIVERSE.items():
+        q=QUOTES.get(sym); b=BORROW.get(sym); a=ANALYTICS.get(sym,{})
+        if not q: continue
+        price=float(q["price"]); eff=str(meta.get("effective_date") or "")
+        active=bool(eff and eff<=utcnow().date().isoformat())
+        trail=TRAIL.setdefault(sym,[]); trail.append((now,price)); trail[:]=[(t,p) for t,p in trail if now-t<=900]
+        ignition=None
+        old=[z for z in trail if 180<=now-z[0]<=480]
+        if old:
+            z=min(old,key=lambda z:abs((now-z[0])-300)); pct=(price/z[1]-1)*100
+            ignition={"pct":round(pct,2),"minutes":round((now-z[0])/60,1),"fresh":3<=pct<=14.99}
+        if not active:
+            ANALYTICS[sym]={"symbol":sym,"active":False,"effective_date":eff,"price":price,"ignition":ignition}; continue
+        low=min(float(a.get("post_split_low") or price),float(q.get("day_low") or price))
+        high=max(float(a.get("highest_since_split") or price),float(q.get("day_high") or price))
+        half=high/2 if high>0 else None
+        half_reached=bool(a.get("half_reached")) or (half is not None and low<=half)
+        last_day=a.get("last_market_day"); market_day=str(q.get("market_timestamp") or "")[:10]
+        sessions=int(a.get("stability_sessions") or 0); prior_low=a.get("post_split_low")
+        new_low=prior_low is not None and low<float(prior_low)-1e-9
+        if new_low: sessions=0
+        elif market_day and market_day!=last_day and prior_low is not None: sessions=min(4,sessions+1)
+        dist=((price/low)-1)*100 if low>0 else None
+        av=b.get("available") if b else None
+        full=half_reached and av is not None and av<=10000 and dist is not None and dist<=10 and sessions>=4
+        score=100.0 if full else min(99.0,score_row(av,dist,sessions))
+        was_ready=bool(a.get("ready"))
+        ready_at=a.get("ready_at"); ready_price=a.get("ready_price")
+        if full and not was_ready:
+            ready_at=utcnow().isoformat(); ready_price=price; add_event(sym,"ready","Entered ready list",{"price":price,"available":av})
+        launched=bool(a.get("launched")); max_rise=a.get("max_rise_pct")
+        if ready_price and ready_price>0:
+            rise=(price/ready_price-1)*100; max_rise=max(float(max_rise or 0),rise)
+            if max_rise>=40 and not launched:
+                launched=True; add_event(sym,"launched","Reached +40% after ready",{"rise_pct":round(max_rise,2)})
+        if ignition and ignition["fresh"] and not (a.get("ignition") or {}).get("fresh"):
+            add_event(sym,"ignition",f"Momentum +{ignition['pct']:.1f}%",ignition)
+        ANALYTICS[sym]={"symbol":sym,"active":True,"effective_date":eff,"price":price,"post_split_low":low,
+            "highest_since_split":high,"half_level":half,"half_reached":half_reached,"distance_from_low_pct":round(dist,2) if dist is not None else None,
+            "stability_sessions":sessions,"available":av,"ctb":b.get("ctb") if b else None,"rebate":b.get("rebate") if b else None,
+            "score":score,"ready":full,"ready_at":ready_at,"ready_price":ready_price,"launched":launched,
+            "max_rise_pct":round(max_rise,2) if max_rise is not None else None,"ignition":ignition,"last_market_day":market_day}
+
+async def analytics_loop():
+    await asyncio.sleep(40)
+    while True:
+        refresh_analytics()
+        await asyncio.sleep(10)
+
 def download_ibkr():
     ftp=ftplib.FTP(timeout=20)
     try:
@@ -201,14 +266,14 @@ async def borrow_loop():
 
 @app.on_event("startup")
 async def startup():
-    asyncio.create_task(heartbeat_loop()); asyncio.create_task(universe_loop()); asyncio.create_task(delayed_market_start()); asyncio.create_task(delayed_borrow_start())
+    asyncio.create_task(heartbeat_loop()); asyncio.create_task(universe_loop()); asyncio.create_task(delayed_market_start()); asyncio.create_task(delayed_borrow_start()); asyncio.create_task(analytics_loop())
 
 @app.get("/")
 async def root():
-    return {"service":"qanas-watcher","message":"Qanas Engine is alive","version":"0.3.0",**STATE,
+    return {"service":"qanas-watcher","message":"Qanas Engine is alive","version":"0.4.0",**STATE,
         "prices_ready":len(QUOTES),"borrow_ready":len(BORROW),"events":len(EVENTS),
         "uptime_seconds":int(time.time()-BOOTED_AT.timestamp()),
-        "endpoints":["/health","/universe","/prices","/borrow","/snapshot","/events"]}
+        "endpoints":["/health","/universe","/prices","/borrow","/snapshot","/signals","/ready","/zero-short","/momentum","/top","/events"]}
 
 @app.get("/health")
 async def health():
@@ -235,6 +300,34 @@ async def snapshot():
     for sym,meta in UNIVERSE.items():
         rows[sym]={"symbol":sym,"effective_date":meta.get("effective_date"),"price":QUOTES.get(sym),"borrow":BORROW.get(sym)}
     return {"generated_at":utcnow().isoformat(),"count":len(rows),"rows":rows}
+
+@app.get("/signals")
+async def signals():
+    rows=sorted(ANALYTICS.values(),key=lambda x:(x.get("score") or 0),reverse=True)
+    return {"generated_at":utcnow().isoformat(),"count":len(rows),"rows":rows}
+
+@app.get("/ready")
+async def ready():
+    rows=[x for x in ANALYTICS.values() if x.get("ready")]
+    rows.sort(key=lambda x:(x.get("available") is None,x.get("available") or 10**18,-(x.get("score") or 0)))
+    return {"count":len(rows),"rows":rows}
+
+@app.get("/zero-short")
+async def zero_short():
+    rows=[x for x in ANALYTICS.values() if x.get("available") is not None and float(x["available"])==0]
+    return {"count":len(rows),"rows":rows}
+
+@app.get("/momentum")
+async def momentum():
+    rows=[x for x in ANALYTICS.values() if (x.get("ignition") or {}).get("fresh")]
+    rows.sort(key=lambda x:(x.get("ignition") or {}).get("pct",0),reverse=True)
+    return {"count":len(rows),"rows":rows}
+
+@app.get("/top")
+async def top():
+    rows=[x for x in ANALYTICS.values() if x.get("launched")]
+    rows.sort(key=lambda x:x.get("max_rise_pct") or 0,reverse=True)
+    return {"count":len(rows),"rows":rows}
 
 @app.get("/events")
 async def events():
