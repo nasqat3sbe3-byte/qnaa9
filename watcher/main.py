@@ -20,7 +20,7 @@ SPLITS_URLS = ("https://stockanalysis.com/actions/splits/2026/", "https://stocka
 
 STATE = {
     "status":"starting","heartbeat":None,"heartbeat_count":0,"booted_at":BOOTED_AT.isoformat(),
-    "universe_count":len(UNIVERSE_SEED),"last_universe_sync":None,"universe_error":None,
+    "universe_count":len(UNIVERSE_SEED),"last_universe_sync":None,"universe_error":None,"universe_attempts":0,"universe_source":"seed",
     "market_scan_count":0,"last_market_scan":None,"market_ok":0,"market_failed":0,"last_market_error":None,
     "borrow_scan_count":0,"last_borrow_scan":None,"borrow_ok":0,"borrow_missing":0,"last_borrow_error":None,
     "pid":os.getpid(),
@@ -41,11 +41,15 @@ async def heartbeat_loop():
         await asyncio.sleep(10)
 
 async def fetch_direct_universe(client):
-    # Yield immediately so the web server can finish binding to :8080 first.
     await asyncio.sleep(0)
     merged={}
+    errors=[]
     for url in SPLITS_URLS:
-        r=await client.get(url,timeout=30); r.raise_for_status()
+        try:
+            r=await client.get(url,timeout=20); r.raise_for_status()
+        except Exception as exc:
+            errors.append(f"{url}: {type(exc).__name__}: {str(exc)[:80]}")
+            continue
         soup=BeautifulSoup(r.text,"html.parser")
         for tr in soup.select("table tbody tr"):
             tds=[td.get_text(" ",strip=True) for td in tr.select("td")]
@@ -55,12 +59,13 @@ async def fetch_direct_universe(client):
             if eff < date(2026,6,1) or eff > utcnow().date(): continue
             sym=tds[1].upper().strip()
             if sym: merged[sym]={"symbol":sym,"company":tds[2],"effective_date":eff.isoformat(),"ratio":tds[4],"source":"stockanalysis"}
-    if not merged: raise RuntimeError("empty direct split feed")
+    if not merged: raise RuntimeError("empty direct split feed | "+" | ".join(errors))
     UNIVERSE.clear(); UNIVERSE.update(merged)
-    STATE["universe_count"]=len(UNIVERSE); STATE["last_universe_sync"]=utcnow().isoformat(); STATE["universe_error"]=None
+    STATE["universe_count"]=len(UNIVERSE); STATE["last_universe_sync"]=utcnow().isoformat(); STATE["universe_error"]=None; STATE["universe_source"]="stockanalysis_direct"
     return True
 
 async def sync_universe(client):
+    STATE["universe_attempts"]+=1
     last_error=None
     try:
         if await fetch_direct_universe(client): return
@@ -86,7 +91,7 @@ async def sync_universe(client):
     if not UNIVERSE:
         UNIVERSE.update({s:{"symbol":s,"effective_date":None,"source":"seed"} for s in UNIVERSE_SEED})
         STATE["universe_count"]=len(UNIVERSE)
-    STATE["universe_error"]=last_error or "unknown"
+    STATE["universe_error"]=last_error or "unknown"; STATE["universe_source"]="seed" if STATE["last_universe_sync"] is None else STATE["universe_source"]
 
 async def universe_loop():
     # Keep Northflank ingress healthy before any external scraping starts.
@@ -196,8 +201,7 @@ async def health():
 
 @app.get("/universe")
 async def universe():
-    return {"count":len(UNIVERSE),"last_sync":STATE["last_universe_sync"],"error":STATE["universe_error"],
-        "symbols":sorted(UNIVERSE)}
+    return {"count":len(UNIVERSE),"last_sync":STATE["last_universe_sync"],"source":STATE["universe_source"],"attempts":STATE["universe_attempts"],"error":STATE["universe_error"],"symbols":sorted(UNIVERSE)}
 
 @app.get("/prices")
 async def prices():
