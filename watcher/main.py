@@ -18,12 +18,12 @@ FTP_HOST, FTP_USER, FTP_PASSWORD, FTP_FILE = "ftp2.interactivebrokers.com", "sho
 
 STATE = {
     "status":"starting","heartbeat":None,"heartbeat_count":0,"booted_at":BOOTED_AT.isoformat(),
-    "universe_count":0,"last_universe_sync":None,"universe_error":None,
+    "universe_count":len(UNIVERSE_SEED),"last_universe_sync":None,"universe_error":None,
     "market_scan_count":0,"last_market_scan":None,"market_ok":0,"market_failed":0,"last_market_error":None,
     "borrow_scan_count":0,"last_borrow_scan":None,"borrow_ok":0,"borrow_missing":0,"last_borrow_error":None,
     "pid":os.getpid(),
 }
-UNIVERSE = {}
+UNIVERSE = {s:{"symbol":s,"effective_date":None,"source":"seed"} for s in UNIVERSE_SEED}
 QUOTES = {}
 BORROW = {}
 EVENTS = []
