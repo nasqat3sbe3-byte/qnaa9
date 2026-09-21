@@ -56,7 +56,11 @@ async def sync_universe(client):
                 STATE["universe_error"]=None
                 return
         except Exception as exc: last_error=f"{path}: {type(exc).__name__}"
-    # Render can be slow to wake up. Never leave the watcher empty while it retries.\n    if not UNIVERSE:\n        UNIVERSE.update({s:{"symbol":s,"effective_date":None,"source":"seed"} for s in UNIVERSE_SEED})\n        STATE["universe_count"]=len(UNIVERSE)\n    STATE["universe_error"]=last_error or "unknown"
+    # Render can be slow to wake up. Never leave the watcher empty while it retries.
+    if not UNIVERSE:
+        UNIVERSE.update({s:{"symbol":s,"effective_date":None,"source":"seed"} for s in UNIVERSE_SEED})
+        STATE["universe_count"]=len(UNIVERSE)
+    STATE["universe_error"]=last_error or "unknown"
 
 async def universe_loop():
     headers={"User-Agent":"Mozilla/5.0 QanasWatcher/0.3"}
