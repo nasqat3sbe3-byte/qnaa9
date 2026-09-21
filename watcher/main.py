@@ -21,7 +21,7 @@ SPLITS_URLS = ("https://stockanalysis.com/actions/splits/2026/", "https://stocka
 STATE = {
     "status":"starting","heartbeat":None,"heartbeat_count":0,"booted_at":BOOTED_AT.isoformat(),
     "universe_count":len(UNIVERSE_SEED),"last_universe_sync":None,"universe_error":None,"universe_attempts":0,"universe_source":"seed",
-    "market_scan_count":0,"last_market_scan":None,"market_ok":0,"market_failed":0,"last_market_error":None,
+    "market_scan_count":0,"last_market_scan":None,"market_ok":0,"market_failed":0,"last_market_error":None,"market_cursor":0,"market_cycle":0,
     "borrow_scan_count":0,"last_borrow_scan":None,"borrow_ok":0,"borrow_missing":0,"last_borrow_error":None,
     "pid":os.getpid(),
 }
@@ -121,23 +121,35 @@ async def fetch_quote(client, sem, symbol):
                 "market_timestamp":datetime.fromtimestamp(t,tz=timezone.utc).isoformat(),"received_at":utcnow().isoformat(),"source":"yahoo_1m_prepost"}
         except Exception:return symbol,None
 
+async def delayed_market_start():
+    await asyncio.sleep(30)
+    await market_loop()
+
 async def market_loop():
+    # Scan small chunks so 255 symbols fit comfortably in the 256 MB sandbox.
     headers={"User-Agent":"Mozilla/5.0 QanasWatcher/0.3"}
-    limits=httpx.Limits(max_connections=12,max_keepalive_connections=10)
+    limits=httpx.Limits(max_connections=5,max_keepalive_connections=4)
     async with httpx.AsyncClient(timeout=8,follow_redirects=True,headers=headers,limits=limits) as client:
         while True:
-            started=time.monotonic()
-            syms=list(UNIVERSE)
-            if syms:
-                sem=asyncio.Semaphore(10)
-                rows=await asyncio.gather(*(fetch_quote(client,sem,s) for s in syms))
-                ok=0
-                for s,row in rows:
-                    if row is not None: QUOTES[s]=row; ok+=1
-                STATE["market_scan_count"]+=1; STATE["last_market_scan"]=utcnow().isoformat()
-                STATE["market_ok"]=ok; STATE["market_failed"]=len(syms)-ok
-                STATE["last_market_error"]=None if ok else "no quotes returned"
-            await asyncio.sleep(max(5,60-(time.monotonic()-started)))
+            syms=sorted(UNIVERSE)
+            if not syms:
+                await asyncio.sleep(10); continue
+            cursor=int(STATE["market_cursor"]) % len(syms)
+            batch=syms[cursor:cursor+12]
+            if len(batch)<12: batch += syms[:12-len(batch)]
+            sem=asyncio.Semaphore(4)
+            rows=await asyncio.gather(*(fetch_quote(client,sem,s) for s in batch))
+            ok=0
+            for s,row in rows:
+                if row is not None: QUOTES[s]=row; ok+=1
+            STATE["market_scan_count"]+=1
+            STATE["last_market_scan"]=utcnow().isoformat()
+            STATE["market_ok"]=ok; STATE["market_failed"]=len(batch)-ok
+            STATE["last_market_error"]=None if ok else "no quotes returned"
+            nxt=(cursor+len(batch)) % len(syms)
+            if nxt <= cursor: STATE["market_cycle"]+=1
+            STATE["market_cursor"]=nxt
+            await asyncio.sleep(3)
 
 def download_ibkr():
     ftp=ftplib.FTP(timeout=20)
@@ -188,7 +200,7 @@ async def borrow_loop():
 
 @app.on_event("startup")
 async def startup():
-    asyncio.create_task(heartbeat_loop()); asyncio.create_task(universe_loop())
+    asyncio.create_task(heartbeat_loop()); asyncio.create_task(universe_loop()); asyncio.create_task(delayed_market_start())
 
 @app.get("/")
 async def root():
@@ -209,7 +221,7 @@ async def universe():
 @app.get("/prices")
 async def prices():
     return {"source":"yahoo_1m_prepost","last_market_scan":STATE["last_market_scan"],"market_scan_count":STATE["market_scan_count"],
-        "ok":STATE["market_ok"],"failed":STATE["market_failed"],"count":len(QUOTES),"quotes":QUOTES}
+        "ok":STATE["market_ok"],"failed":STATE["market_failed"],"cursor":STATE["market_cursor"],"cycle":STATE["market_cycle"],"universe_count":len(UNIVERSE),"count":len(QUOTES),"quotes":QUOTES}
 
 @app.get("/borrow")
 async def borrow():
