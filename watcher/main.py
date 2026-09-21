@@ -25,7 +25,7 @@ STATE = {
     "universe_count":len(UNIVERSE_SEED),"last_universe_sync":None,"universe_error":None,"universe_attempts":0,"universe_source":"seed",
     "market_scan_count":0,"last_market_scan":None,"market_ok":0,"market_failed":0,"last_market_error":None,"market_cursor":0,"market_cycle":0,
     "borrow_scan_count":0,"last_borrow_scan":None,"borrow_ok":0,"borrow_missing":0,"last_borrow_error":None,
-    "analytics_count":0,"last_analytics":None,"last_state_save":None,"persistence_error":None,"pid":os.getpid(),
+    "analytics_count":0,"last_analytics":None,"last_halt_scan":None,"halt_error":None,"last_news_scan":None,"news_error":None,"last_state_save":None,"persistence_error":None,"pid":os.getpid(),
 }
 UNIVERSE = {s:{"symbol":s,"effective_date":None,"source":"seed"} for s in UNIVERSE_SEED}
 QUOTES = {}
@@ -33,6 +33,8 @@ BORROW = {}
 EVENTS = []
 ANALYTICS = {}
 TRAIL = {}
+HALTS = {}
+NEWS = {}
 STATE_FILE = Path(os.environ.get("QANAS_STATE_FILE","/tmp/qanas_watcher_state.json"))
 _LAST_SAVE = 0.0
 
@@ -331,17 +333,57 @@ async def borrow_loop():
         except Exception as exc: STATE["last_borrow_error"]=f"{type(exc).__name__}: {str(exc)[:120]}"
         await asyncio.sleep(300)
 
+async def halt_loop():
+    await asyncio.sleep(60)
+    url="https://www.nasdaqtrader.com/dynamic/symdir/tradinghalts.txt"
+    async with httpx.AsyncClient(timeout=8,follow_redirects=True) as client:
+        while True:
+            try:
+                r=await client.get(url); r.raise_for_status(); fresh={}
+                for line in r.text.splitlines():
+                    p=line.split("|")
+                    if len(p)>=6 and p[0] and p[0]!="Halt Date":
+                        sym=p[2].upper().strip()
+                        if sym in UNIVERSE:fresh[sym]={"symbol":sym,"reason":p[5],"halt_time":p[1],"halt_date":p[0]}
+                for sym,row in fresh.items():
+                    key=row["halt_date"]+" "+row["halt_time"]+" "+row["reason"]
+                    if HALTS.get(sym,{}).get("_key")!=key:add_event(sym,"halt","HALT "+row["reason"],row)
+                    row["_key"]=key
+                HALTS.clear(); HALTS.update(fresh); STATE["last_halt_scan"]=utcnow().isoformat(); STATE["halt_error"]=None
+            except Exception as exc:STATE["halt_error"]=f"{type(exc).__name__}: {str(exc)[:100]}"
+            await asyncio.sleep(120)
+
+async def news_loop():
+    # Reuse the proven Qanas SEC layer without putting news into readiness scoring.
+    await asyncio.sleep(210)
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=20,follow_redirects=True) as client:
+                r=await client.get(QANAS_WEB+"/api/news-radar"); r.raise_for_status(); data=r.json()
+            fresh={}
+            for tone_name in ("positive","negative"):
+                for x in data.get(tone_name,[]) or []:
+                    sym=str(x.get("symbol") or "").upper()
+                    if sym in UNIVERSE:
+                        item={**x,"tone":tone_name}; fresh.setdefault(sym,[]).append(item)
+                        key=str(x.get("published_at"))+"|"+str(x.get("title"))
+                        seen={str(z.get("published_at"))+"|"+str(z.get("title")) for z in NEWS.get(sym,[])}
+                        if tone_name=="positive" and key not in seen:add_event(sym,"positive_news","Positive news",{"title":x.get("title"),"source":x.get("source")})
+            NEWS.clear(); NEWS.update(fresh); STATE["last_news_scan"]=utcnow().isoformat(); STATE["news_error"]=None
+        except Exception as exc:STATE["news_error"]=f"{type(exc).__name__}: {str(exc)[:100]}"
+        await asyncio.sleep(600)
+
 @app.on_event("startup")
 async def startup():
     load_persistent_state()
-    asyncio.create_task(heartbeat_loop()); asyncio.create_task(universe_loop()); asyncio.create_task(delayed_market_start()); asyncio.create_task(delayed_borrow_start()); asyncio.create_task(analytics_loop())
+    asyncio.create_task(heartbeat_loop()); asyncio.create_task(universe_loop()); asyncio.create_task(delayed_market_start()); asyncio.create_task(delayed_borrow_start()); asyncio.create_task(analytics_loop()); asyncio.create_task(halt_loop()); asyncio.create_task(news_loop())
 
 @app.get("/")
 async def root():
     return {"service":"qanas-watcher","message":"Qanas Engine is alive","version":"0.5.0",**STATE,
         "prices_ready":len(QUOTES),"borrow_ready":len(BORROW),"events":len(EVENTS),
         "uptime_seconds":int(time.time()-BOOTED_AT.timestamp()),
-        "endpoints":["/health","/universe","/prices","/borrow","/snapshot","/signals","/ready","/zero-short","/momentum","/top","/events"]}
+        "endpoints":["/health","/universe","/prices","/borrow","/snapshot","/signals","/ready","/zero-short","/momentum","/top","/halts","/news","/events"]}
 
 @app.get("/health")
 async def health():
@@ -396,6 +438,14 @@ async def top():
     rows=[x for x in ANALYTICS.values() if x.get("launched")]
     rows.sort(key=lambda x:x.get("max_rise_pct") or 0,reverse=True)
     return {"count":len(rows),"rows":rows}
+
+@app.get("/halts")
+async def halts():
+    return {"last_scan":STATE["last_halt_scan"],"error":STATE["halt_error"],"count":len(HALTS),"rows":HALTS}
+
+@app.get("/news")
+async def news():
+    return {"last_scan":STATE["last_news_scan"],"error":STATE["news_error"],"count":len(NEWS),"rows":NEWS}
 
 @app.get("/events")
 async def events():
