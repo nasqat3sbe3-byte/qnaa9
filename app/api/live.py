@@ -8,6 +8,7 @@ from ..services.live_prices import get_live_prices
 from ..services.turbo_prices import ensure_turbo
 
 router=APIRouter()
+_HALT_CACHE={"at":0,"rows":[]}
 
 @router.get('/live-prices')
 async def live_prices():
