@@ -11,7 +11,7 @@ from fastapi import FastAPI
 
 app = FastAPI(title="Qanas Watcher", version="0.3.0")
 BOOTED_AT = datetime.now(timezone.utc)
-QANAS_WEB = "https://qnaa9.onrender.com"
+QANAS_WEB = "https://qnaa9.onrender.com"\nUNIVERSE_SEED = ["MSGY","WCT","NCT","EPOW","CPOP","LGCL","NRSN","HUBC","MGN","FGL","OMH","AIXI","SFWL","TNMG","LRHC","RCON","CXAI","YYAI","YXT","RBNE","CISS","IZM","GAUZ","LGHL","UCAR","HLSQ","ALP","GTBP","GOSS","JAGX","NFE","IPDN","NXXT","ENLV","STKH","TRIB","FFAI"]
 YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 FTP_HOST, FTP_USER, FTP_PASSWORD, FTP_FILE = "ftp2.interactivebrokers.com", "shortstock", "", "usa.txt"
 
@@ -41,7 +41,7 @@ async def sync_universe(client):
     last_error=None
     for path in ("/api/hunt","/api/splits"):
         try:
-            r=await client.get(QANAS_WEB+path,timeout=25); r.raise_for_status(); rows=r.json()
+            r=await client.get(QANAS_WEB+path,timeout=60); r.raise_for_status(); rows=r.json()
             if not isinstance(rows,list) or not rows: raise RuntimeError("empty universe")
             fresh={}
             today=utcnow().date().isoformat()
@@ -55,14 +55,14 @@ async def sync_universe(client):
                 STATE["universe_error"]=None
                 return
         except Exception as exc: last_error=f"{path}: {type(exc).__name__}"
-    STATE["universe_error"]=last_error or "unknown"
+    # Render can be slow to wake up. Never leave the watcher empty while it retries.\n    if not UNIVERSE:\n        UNIVERSE.update({s:{"symbol":s,"effective_date":None,"source":"seed"} for s in UNIVERSE_SEED})\n        STATE["universe_count"]=len(UNIVERSE)\n    STATE["universe_error"]=last_error or "unknown"
 
 async def universe_loop():
     headers={"User-Agent":"Mozilla/5.0 QanasWatcher/0.3"}
     async with httpx.AsyncClient(follow_redirects=True,headers=headers) as client:
         while True:
             await sync_universe(client)
-            await asyncio.sleep(600)
+            await asyncio.sleep(120)
 
 async def fetch_quote(client, sem, symbol):
     async with sem:
