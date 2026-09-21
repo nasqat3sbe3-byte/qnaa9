@@ -153,17 +153,58 @@ async def market_loop():
             STATE["market_cursor"]=nxt
             await asyncio.sleep(3)
 
-def score_row(available, distance, sessions):
-    if available is None: ap=0
-    elif available<=10000: ap=45
-    elif available<=20000: ap=45-15*((available-10000)/10000)
+def readiness_state(meta,q,b,a):
+    price=float(q["price"]); live_low=float(q.get("day_low") or price)
+    prior_low=a.get("post_split_low")
+    new_low=prior_low is not None and live_low<float(prior_low)
+    effective_low=live_low if new_low else (float(prior_low) if prior_low is not None else live_low)
+    dist=((price/effective_low)-1)*100 if effective_low>0 else None
+    sessions=0 if new_low else int(a.get("stability_sessions") or 0)
+    market_day=str(q.get("market_timestamp") or "")[:10]
+    last_day=a.get("last_market_day")
+    if not new_low and prior_low is not None and market_day and market_day!=last_day:
+        sessions=min(4,sessions+1)
+    high=max(float(a.get("highest_since_split") or price),float(q.get("day_high") or price))
+    half=high/2 if high>0 else None
+    half_ok=bool(a.get("half_reached")) or (half is not None and effective_low<=half)
+    av=b.get("available") if b else None
+    price_ok=price>0; av_ok=av is not None and av<=10000
+    dist_ok=dist is not None and dist<=10; sess_ok=sessions>=4
+    missing=[]; close=True
+    if not half_ok: missing.append(f"يحقق شرط النصف <= {half:.4f}" if half else "حساب مستوى النصف"); close=False
+    if new_low: missing.append("كون قاع جديد اليوم: يبدأ الثبات من 0/4"); close=False
+    if not av_ok:
+        missing.append("Available ينزل إلى <=10K" if av is not None else "قراءة Available")
+        close=close and av is not None and av<=20000
+    if not dist_ok:
+        missing.append(f"يرجع أقرب للقاع: الآن {dist:.2f}% والهدف <=10%" if dist is not None else "حساب البعد عن القاع")
+        close=close and dist is not None and dist<=20
+    if not sess_ok and not new_low:
+        missing.append(f"{max(0,4-sessions)} جلسة ثبات إضافية للوصول إلى 4/4")
+        close=close and sessions>=2
+    if not price_ok: missing.append("تحديث السعر الحالي"); close=False
+    full=price_ok and half_ok and not new_low and av_ok and dist_ok and sess_ok
+    shortlist=full or (price_ok and half_ok and not new_low and close and 1<=len(missing)<=2)
+    if av is None: ap=0
+    elif av<=10000: ap=45
+    elif av<=20000: ap=45-15*((av-10000)/10000)
     else: ap=0
-    if distance is None: dp=0
-    elif distance<=10: dp=30
-    elif distance<=20: dp=30-15*((distance-10)/10)
+    if dist is None: dp=0
+    elif dist<=10: dp=30
+    elif dist<=20: dp=30-15*((dist-10)/10)
     else: dp=0
     sp=25 if sessions>=4 else 19 if sessions==3 else 12 if sessions==2 else 6 if sessions==1 else 0
-    return round(min(100,ap+dp+sp),1)
+    pct=100.0 if full else round(min(99.0,ap+dp+sp),1)
+    strengths=[]
+    if half_ok: strengths.append("شرط النصف ✓")
+    if av_ok: strengths.append(f"Available {int(av):,} ✓")
+    if dist_ok: strengths.append(f"عن القاع {dist:.2f}% ✓")
+    if sess_ok: strengths.append("ثبات 4/4 ✓")
+    return {"full":full,"shortlist":shortlist,"readiness_pct":pct,"missing_count":len(missing),
+        "missing":" + ".join(missing) if missing else "مكتمل ✓","strength":" | ".join(strengths),
+        "new_low_today":new_low,"effective_low":effective_low,"effective_distance_pct":dist,
+        "effective_sessions":sessions,"highest_since_split":high,"half_level":half,"half_reached":half_ok,
+        "market_day":market_day}
 
 def refresh_analytics():
     now=time.time()
@@ -176,39 +217,39 @@ def refresh_analytics():
         ignition=None
         old=[z for z in trail if 180<=now-z[0]<=480]
         if old:
-            z=min(old,key=lambda z:abs((now-z[0])-300)); pct=(price/z[1]-1)*100
-            ignition={"pct":round(pct,2),"minutes":round((now-z[0])/60,1),"fresh":3<=pct<=14.99}
+            z=min(old,key=lambda z:abs((now-z[0])-300)); pct5=(price/z[1]-1)*100
+            ignition={"pct":round(pct5,2),"minutes":round((now-z[0])/60,1),"fresh":3<=pct5<=14.99}
         if not active:
             ANALYTICS[sym]={"symbol":sym,"active":False,"effective_date":eff,"price":price,"ignition":ignition}; continue
-        low=min(float(a.get("post_split_low") or price),float(q.get("day_low") or price))
-        high=max(float(a.get("highest_since_split") or price),float(q.get("day_high") or price))
-        half=high/2 if high>0 else None
-        half_reached=bool(a.get("half_reached")) or (half is not None and low<=half)
-        last_day=a.get("last_market_day"); market_day=str(q.get("market_timestamp") or "")[:10]
-        sessions=int(a.get("stability_sessions") or 0); prior_low=a.get("post_split_low")
-        new_low=prior_low is not None and low<float(prior_low)-1e-9
-        if new_low: sessions=0
-        elif market_day and market_day!=last_day and prior_low is not None: sessions=min(4,sessions+1)
-        dist=((price/low)-1)*100 if low>0 else None
-        av=b.get("available") if b else None
-        full=half_reached and av is not None and av<=10000 and dist is not None and dist<=10 and sessions>=4
-        score=100.0 if full else min(99.0,score_row(av,dist,sessions))
-        was_ready=bool(a.get("ready"))
+        st=readiness_state(meta,q,b,a)
+        full=st["full"]; was_ready=bool(a.get("ready"))
         ready_at=a.get("ready_at"); ready_price=a.get("ready_price")
-        if full and not was_ready:
-            ready_at=utcnow().isoformat(); ready_price=price; add_event(sym,"ready","Entered ready list",{"price":price,"available":av})
+        if full and ready_at is None:
+            ready_at=utcnow().isoformat(); ready_price=price
+            add_event(sym,"ready","Entered ready list",{"price":price,"available":b.get("available") if b else None})
         launched=bool(a.get("launched")); max_rise=a.get("max_rise_pct")
         if ready_price and ready_price>0:
-            rise=(price/ready_price-1)*100; max_rise=max(float(max_rise or 0),rise)
+            # Match Qanas: TOP follows the highest observed price after the first qualifying ready moment.
+            hi=float(q.get("day_high") or price); rise=(hi/ready_price-1)*100
+            max_rise=max(float(max_rise or 0),rise)
             if max_rise>=40 and not launched:
                 launched=True; add_event(sym,"launched","Reached +40% after ready",{"rise_pct":round(max_rise,2)})
         if ignition and ignition["fresh"] and not (a.get("ignition") or {}).get("fresh"):
             add_event(sym,"ignition",f"Momentum +{ignition['pct']:.1f}%",ignition)
-        ANALYTICS[sym]={"symbol":sym,"active":True,"effective_date":eff,"price":price,"post_split_low":low,
-            "highest_since_split":high,"half_level":half,"half_reached":half_reached,"distance_from_low_pct":round(dist,2) if dist is not None else None,
-            "stability_sessions":sessions,"available":av,"ctb":b.get("ctb") if b else None,"rebate":b.get("rebate") if b else None,
-            "score":score,"ready":full,"ready_at":ready_at,"ready_price":ready_price,"launched":launched,
-            "max_rise_pct":round(max_rise,2) if max_rise is not None else None,"ignition":ignition,"last_market_day":market_day}
+        ANALYTICS[sym]={"symbol":sym,"active":True,"effective_date":eff,"price":price,
+            "post_split_low":st["effective_low"],"highest_since_split":st["highest_since_split"],
+            "half_level":st["half_level"],"half_reached":st["half_reached"],
+            "distance_from_low_pct":round(st["effective_distance_pct"],2) if st["effective_distance_pct"] is not None else None,
+            "stability_sessions":st["effective_sessions"],"effective_low":st["effective_low"],
+            "effective_distance_pct":round(st["effective_distance_pct"],2) if st["effective_distance_pct"] is not None else None,
+            "effective_sessions":st["effective_sessions"],"new_low_today":st["new_low_today"],
+            "available":b.get("available") if b else None,"ctb":b.get("ctb") if b else None,"rebate":b.get("rebate") if b else None,
+            "readiness_pct":st["readiness_pct"],"score":st["readiness_pct"],"ready":full,
+            "near_ready":st["shortlist"] and not full and not launched,"shortlist":st["shortlist"] and not launched,
+            "missing_count":st["missing_count"],"missing":st["missing"],"strength":st["strength"],
+            "ready_at":ready_at,"ready_price":ready_price,"launched":launched,
+            "max_rise_pct":round(max_rise,2) if max_rise is not None else None,"rise_pct":round(max_rise,2) if max_rise is not None else None,
+            "ignition":ignition,"last_market_day":st["market_day"]}
 
 async def analytics_loop():
     await asyncio.sleep(40)
