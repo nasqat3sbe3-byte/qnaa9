@@ -23,7 +23,7 @@ STATE = {
     "universe_count":len(UNIVERSE_SEED),"last_universe_sync":None,"universe_error":None,"universe_attempts":0,"universe_source":"seed",
     "market_scan_count":0,"last_market_scan":None,"market_ok":0,"market_failed":0,"last_market_error":None,"market_cursor":0,"market_cycle":0,
     "borrow_scan_count":0,"last_borrow_scan":None,"borrow_ok":0,"borrow_missing":0,"last_borrow_error":None,
-    "pid":os.getpid(),
+    "analytics_count":0,"last_analytics":None,"pid":os.getpid(),
 }
 UNIVERSE = {s:{"symbol":s,"effective_date":None,"source":"seed"} for s in UNIVERSE_SEED}
 QUOTES = {}
@@ -213,7 +213,7 @@ def refresh_analytics():
 async def analytics_loop():
     await asyncio.sleep(40)
     while True:
-        refresh_analytics()
+        refresh_analytics(); STATE["analytics_count"]=len(ANALYTICS); STATE["last_analytics"]=utcnow().isoformat()
         await asyncio.sleep(10)
 
 def download_ibkr():
@@ -298,7 +298,7 @@ async def borrow():
 async def snapshot():
     rows={}
     for sym,meta in UNIVERSE.items():
-        rows[sym]={"symbol":sym,"effective_date":meta.get("effective_date"),"price":QUOTES.get(sym),"borrow":BORROW.get(sym)}
+        rows[sym]={"symbol":sym,"effective_date":meta.get("effective_date"),"price":QUOTES.get(sym),"borrow":BORROW.get(sym),"signal":ANALYTICS.get(sym)}
     return {"generated_at":utcnow().isoformat(),"count":len(rows),"rows":rows}
 
 @app.get("/signals")
