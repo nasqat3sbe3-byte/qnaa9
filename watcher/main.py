@@ -3,6 +3,8 @@ import ftplib
 import io
 import os
 import re
+import json
+from pathlib import Path
 import time
 from datetime import datetime, timezone, date
 
@@ -10,7 +12,7 @@ import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI
 
-app = FastAPI(title="Qanas Watcher", version="0.4.0")
+app = FastAPI(title="Qanas Watcher", version="0.5.0")
 BOOTED_AT = datetime.now(timezone.utc)
 QANAS_WEB = "https://qnaa9.onrender.com"
 UNIVERSE_SEED = ["MSGY","WCT","NCT","EPOW","CPOP","LGCL","NRSN","HUBC","MGN","FGL","OMH","AIXI","SFWL","TNMG","LRHC","RCON","CXAI","YYAI","YXT","RBNE","CISS","IZM","GAUZ","LGHL","UCAR","HLSQ","ALP","GTBP","GOSS","JAGX","NFE","IPDN","NXXT","ENLV","STKH","TRIB","FFAI"]
@@ -23,7 +25,7 @@ STATE = {
     "universe_count":len(UNIVERSE_SEED),"last_universe_sync":None,"universe_error":None,"universe_attempts":0,"universe_source":"seed",
     "market_scan_count":0,"last_market_scan":None,"market_ok":0,"market_failed":0,"last_market_error":None,"market_cursor":0,"market_cycle":0,
     "borrow_scan_count":0,"last_borrow_scan":None,"borrow_ok":0,"borrow_missing":0,"last_borrow_error":None,
-    "analytics_count":0,"last_analytics":None,"pid":os.getpid(),
+    "analytics_count":0,"last_analytics":None,"last_state_save":None,"persistence_error":None,"pid":os.getpid(),
 }
 UNIVERSE = {s:{"symbol":s,"effective_date":None,"source":"seed"} for s in UNIVERSE_SEED}
 QUOTES = {}
@@ -31,6 +33,30 @@ BORROW = {}
 EVENTS = []
 ANALYTICS = {}
 TRAIL = {}
+STATE_FILE = Path(os.environ.get("QANAS_STATE_FILE","/tmp/qanas_watcher_state.json"))
+_LAST_SAVE = 0.0
+
+def load_persistent_state():
+    try:
+        if not STATE_FILE.exists(): return
+        d=json.loads(STATE_FILE.read_text("utf-8"))
+        ANALYTICS.update(d.get("analytics") or {})
+        BORROW.update(d.get("borrow") or {})
+        EVENTS.extend((d.get("events") or [])[:100])
+    except Exception as exc:
+        STATE["persistence_error"]=f"load {type(exc).__name__}: {str(exc)[:100]}"
+
+def save_persistent_state(force=False):
+    global _LAST_SAVE
+    now=time.time()
+    if not force and now-_LAST_SAVE<60:return
+    try:
+        tmp=STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"saved_at":utcnow().isoformat(),"analytics":ANALYTICS,"borrow":BORROW,"events":EVENTS[:100]},separators=(",",":")),"utf-8")
+        tmp.replace(STATE_FILE); _LAST_SAVE=now
+        STATE["last_state_save"]=utcnow().isoformat(); STATE["persistence_error"]=None
+    except Exception as exc:
+        STATE["persistence_error"]=f"save {type(exc).__name__}: {str(exc)[:100]}"
 
 def utcnow(): return datetime.now(timezone.utc)
 def add_event(symbol, kind, text, data=None):
@@ -254,7 +280,7 @@ def refresh_analytics():
 async def analytics_loop():
     await asyncio.sleep(40)
     while True:
-        refresh_analytics(); STATE["analytics_count"]=len(ANALYTICS); STATE["last_analytics"]=utcnow().isoformat()
+        refresh_analytics(); STATE["analytics_count"]=len(ANALYTICS); STATE["last_analytics"]=utcnow().isoformat(); save_persistent_state()
         await asyncio.sleep(10)
 
 def download_ibkr():
@@ -307,11 +333,12 @@ async def borrow_loop():
 
 @app.on_event("startup")
 async def startup():
+    load_persistent_state()
     asyncio.create_task(heartbeat_loop()); asyncio.create_task(universe_loop()); asyncio.create_task(delayed_market_start()); asyncio.create_task(delayed_borrow_start()); asyncio.create_task(analytics_loop())
 
 @app.get("/")
 async def root():
-    return {"service":"qanas-watcher","message":"Qanas Engine is alive","version":"0.4.0",**STATE,
+    return {"service":"qanas-watcher","message":"Qanas Engine is alive","version":"0.5.0",**STATE,
         "prices_ready":len(QUOTES),"borrow_ready":len(BORROW),"events":len(EVENTS),
         "uptime_seconds":int(time.time()-BOOTED_AT.timestamp()),
         "endpoints":["/health","/universe","/prices","/borrow","/snapshot","/signals","/ready","/zero-short","/momentum","/top","/events"]}
