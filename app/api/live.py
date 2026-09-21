@@ -5,7 +5,6 @@ from sqlalchemy import select
 from ..db import SessionLocal
 from ..models import Stock
 from ..services.live_prices import get_live_prices
-from ..services.turbo_prices import ensure_turbo
 
 router=APIRouter()
 _HALT_CACHE={"at":0,"rows":[]}
@@ -17,14 +16,7 @@ async def live_prices():
         symbols=db.scalars(select(Stock.symbol)).all()
     finally:
         db.close()
-    # Turbo quotes overlay the stable 1m engine when a newer websocket quote exists.
-    # If turbo is unavailable, behavior is identical to the proven fallback.
-    turbo=await ensure_turbo(symbols)
     prices=await get_live_prices(symbols)
-    for symbol,row in turbo.items():
-        old=prices.get(symbol)
-        if old is None or str(row.get("live_timestamp",""))>=str(old.get("live_timestamp","")):
-            merged=dict(old or {});merged.update(row);prices[symbol]=merged
     return [{"symbol":symbol,**row} for symbol,row in prices.items()]
 
 
