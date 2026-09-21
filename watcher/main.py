@@ -185,7 +185,6 @@ async def borrow_loop():
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(heartbeat_loop()); asyncio.create_task(universe_loop())
-    asyncio.create_task(market_loop()); asyncio.create_task(delayed_borrow_start())
 
 @app.get("/")
 async def root():
