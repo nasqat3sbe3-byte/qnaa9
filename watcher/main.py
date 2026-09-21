@@ -175,7 +175,8 @@ def parse_ibkr(text):
     return out
 
 async def delayed_borrow_start():
-    await asyncio.sleep(45)
+    # Let universe and price workers settle first on the 256 MB sandbox.
+    await asyncio.sleep(150)
     await borrow_loop()
 
 async def borrow_loop():
@@ -200,7 +201,7 @@ async def borrow_loop():
 
 @app.on_event("startup")
 async def startup():
-    asyncio.create_task(heartbeat_loop()); asyncio.create_task(universe_loop()); asyncio.create_task(delayed_market_start())
+    asyncio.create_task(heartbeat_loop()); asyncio.create_task(universe_loop()); asyncio.create_task(delayed_market_start()); asyncio.create_task(delayed_borrow_start())
 
 @app.get("/")
 async def root():
