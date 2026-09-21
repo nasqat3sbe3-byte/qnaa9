@@ -4,9 +4,10 @@ import io
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 
 import httpx
+from bs4 import BeautifulSoup
 from fastapi import FastAPI
 
 app = FastAPI(title="Qanas Watcher", version="0.3.0")
@@ -15,6 +16,7 @@ QANAS_WEB = "https://qnaa9.onrender.com"
 UNIVERSE_SEED = ["MSGY","WCT","NCT","EPOW","CPOP","LGCL","NRSN","HUBC","MGN","FGL","OMH","AIXI","SFWL","TNMG","LRHC","RCON","CXAI","YYAI","YXT","RBNE","CISS","IZM","GAUZ","LGHL","UCAR","HLSQ","ALP","GTBP","GOSS","JAGX","NFE","IPDN","NXXT","ENLV","STKH","TRIB","FFAI"]
 YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 FTP_HOST, FTP_USER, FTP_PASSWORD, FTP_FILE = "ftp2.interactivebrokers.com", "shortstock", "", "usa.txt"
+SPLITS_URLS = ("https://stockanalysis.com/actions/splits/2026/", "https://stockanalysis.com/actions/splits/")
 
 STATE = {
     "status":"starting","heartbeat":None,"heartbeat_count":0,"booted_at":BOOTED_AT.isoformat(),
@@ -38,8 +40,30 @@ async def heartbeat_loop():
         STATE["status"]="running"; STATE["heartbeat"]=utcnow().isoformat(); STATE["heartbeat_count"]+=1
         await asyncio.sleep(10)
 
+async def fetch_direct_universe(client):
+    merged={}
+    for url in SPLITS_URLS:
+        r=await client.get(url,timeout=30); r.raise_for_status()
+        soup=BeautifulSoup(r.text,"html.parser")
+        for tr in soup.select("table tbody tr"):
+            tds=[td.get_text(" ",strip=True) for td in tr.select("td")]
+            if len(tds)<5 or tds[3].lower()!="reverse": continue
+            try: eff=datetime.strptime(tds[0],"%b %d, %Y").date()
+            except Exception: continue
+            if eff < date(2026,6,1) or eff > utcnow().date(): continue
+            sym=tds[1].upper().strip()
+            if sym: merged[sym]={"symbol":sym,"company":tds[2],"effective_date":eff.isoformat(),"ratio":tds[4],"source":"stockanalysis"}
+    if not merged: raise RuntimeError("empty direct split feed")
+    UNIVERSE.clear(); UNIVERSE.update(merged)
+    STATE["universe_count"]=len(UNIVERSE); STATE["last_universe_sync"]=utcnow().isoformat(); STATE["universe_error"]=None
+    return True
+
 async def sync_universe(client):
     last_error=None
+    try:
+        if await fetch_direct_universe(client): return
+    except Exception as exc:
+        last_error=f"direct: {type(exc).__name__}"
     for path in ("/api/hunt","/api/splits"):
         try:
             r=await client.get(QANAS_WEB+path,timeout=60); r.raise_for_status(); rows=r.json()
