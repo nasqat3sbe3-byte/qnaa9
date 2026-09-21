@@ -11,6 +11,7 @@ from datetime import datetime, timezone, date
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 
 app = FastAPI(title="Qanas Watcher", version="0.5.0")
 BOOTED_AT = datetime.now(timezone.utc)
@@ -383,7 +384,26 @@ async def root():
     return {"service":"qanas-watcher","message":"Qanas Engine is alive","version":"0.5.0",**STATE,
         "prices_ready":len(QUOTES),"borrow_ready":len(BORROW),"events":len(EVENTS),
         "uptime_seconds":int(time.time()-BOOTED_AT.timestamp()),
-        "endpoints":["/health","/universe","/prices","/borrow","/snapshot","/signals","/ready","/zero-short","/momentum","/top","/halts","/news","/events"]}
+        "endpoints":["/dashboard","/health","/universe","/prices","/borrow","/snapshot","/signals","/ready","/zero-short","/momentum","/top","/halts","/news","/events"]}
+
+DASHBOARD = r"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>قنص · التجريبي</title><style>
+*{box-sizing:border-box}body{margin:0;background:#05090d;color:#edf3f5;font-family:Segoe UI,Tahoma,Arial}.w{padding:14px;max-width:1600px;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}.brand{font-size:25px;font-weight:900}.brand b{color:#d8b468}.health{color:#55dfa0}.stats,.filters{display:flex;gap:8px;flex-wrap:wrap}.stat,.btn{background:#0a141b;border:1px solid #1b303a;border-radius:10px;padding:9px 12px}.stat small{display:block;color:#71828e}.btn{color:#dce7eb;cursor:pointer}.btn.on{background:#c9a75e;color:#070a0c;font-weight:900}.filters{margin:12px 0}.box{overflow:auto;border:1px solid #172631;border-radius:12px}table{width:100%;min-width:1250px;border-collapse:collapse}th,td{padding:9px;border-bottom:1px solid #12212b;text-align:right;white-space:nowrap}th{color:#71828e;font-size:10px;background:#081119;position:sticky;top:0}.sym{font-size:15px;font-weight:900}.good{color:#55dfa0}.gold{color:#e5bd62}.bad{color:#ff8b7b}.muted{color:#71828e}.event{padding:7px 0;border-bottom:1px solid #172631}.panels{display:grid;grid-template-columns:2fr 1fr;gap:12px}.events{border:1px solid #49391d;background:#100e09;border-radius:12px;padding:12px;max-height:420px;overflow:auto}@media(max-width:850px){.panels{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.stats{display:grid;grid-template-columns:repeat(2,1fr);width:100%}.box{max-height:65vh}}</style></head><body><div class="w">
+<div class="top"><div class="brand">قنص <b>· المحرك التجريبي</b></div><div id="hb" class="health">● جاري الاتصال...</div></div>
+<div class="stats"><div class="stat"><small>Universe</small><b id="u">—</b></div><div class="stat"><small>أسعار</small><b id="p">—</b></div><div class="stat"><small>IBKR</small><b id="b">—</b></div><div class="stat"><small>Signals</small><b id="s">—</b></div><div class="stat"><small>آخر تحديث</small><b id="t">—</b></div></div>
+<div class="filters"><button class="btn on" data-f="all">الكل</button><button class="btn" data-f="ready">🎯 الأجهز</button><button class="btn" data-f="zero">🔥 0 شورت</button><button class="btn" data-f="momentum">⚡ لحظي</button><button class="btn" data-f="top">👑 TOP +40%</button></div>
+<div class="panels"><div class="box"><table><thead><tr><th>السهم</th><th>السعر</th><th>الجاهزية</th><th>Available</th><th>CTB</th><th>Rebate</th><th>القاع</th><th>عن القاع</th><th>النصف</th><th>الثبات</th><th>⚡</th><th>الحالة</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="events"><b>🔔 مركز الأحداث</b><div id="ev"></div></div></div></div><script>
+let snap={},events=[],filter='all';const n=v=>v==null?'—':Number(v).toLocaleString('en-US',{maximumFractionDigits:2}),m=v=>v==null?'—':'$'+Number(v).toFixed(4),pc=v=>v==null?'—':Number(v).toFixed(2)+'%';
+async function j(x){let r=await fetch(x,{cache:'no-store'});if(!r.ok)throw Error(r.status);return r.json()}
+function arr(){let a=Object.values(snap.rows||{}).map(x=>({...x,...(x.signal||{}),q:x.price||{},br:x.borrow||{}}));if(filter==='ready')a=a.filter(x=>x.ready||x.near_ready);if(filter==='zero')a=a.filter(x=>x.br.available!=null&&Number(x.br.available)===0);if(filter==='momentum')a=a.filter(x=>x.ignition?.fresh);if(filter==='top')a=a.filter(x=>x.launched);return a.sort((a,b)=>(Number(b.readiness_pct||0)-Number(a.readiness_pct||0)))}
+function render(){rows.innerHTML=arr().map(x=>'<tr><td><span class="sym">'+x.symbol+'</span><div class="muted">'+(x.effective_date||'')+'</div></td><td class="good">'+m(x.q.price??x.price)+'</td><td class="gold">'+n(x.readiness_pct)+'%</td><td>'+n(x.br.available??x.available)+'</td><td>'+pc(x.br.ctb??x.ctb)+'</td><td>'+pc(x.br.rebate??x.rebate)+'</td><td>'+m(x.effective_low)+'</td><td>'+pc(x.effective_distance_pct)+'</td><td>'+m(x.half_level)+'</td><td>'+n(x.effective_sessions)+'/4</td><td class="good">'+(x.ignition?.fresh?('+'+n(x.ignition.pct)+'%'):'—')+'</td><td>'+(x.launched?'👑 TOP':x.ready?'🎯 جاهز':x.near_ready?'🟡 قريب':x.new_low_today?'🔻 قاع جديد':'—')+'</td></tr>').join('')||'<tr><td colspan="12">لا توجد نتائج في هذا الفلتر</td></tr>';ev.innerHTML=events.slice(0,30).map(e=>'<div class="event"><b>'+e.symbol+'</b> · '+e.text+'<div class="muted">'+String(e.at||'').replace('T',' ').slice(0,19)+'</div></div>').join('')||'<div class="muted" style="margin-top:10px">لا توجد أحداث بعد</div>'}
+async function load(){try{let [h,x,e]=await Promise.all([j('/health'),j('/snapshot'),j('/events')]);snap=x;events=e.events||[];u.textContent=h.universe_count;p.textContent=h.prices_ready??Object.values(x.rows||{}).filter(z=>z.price).length;b.textContent=h.borrow_ok;s.textContent=h.analytics_count;t.textContent=new Date().toLocaleTimeString('ar-SA');hb.textContent=h.ok?'● المحرك يعمل · آخر نبضة '+Math.round(h.heartbeat_age_seconds||0)+'ث':'● مشكلة بالمحرك';render()}catch(e){hb.textContent='● تعذر الاتصال'}}
+document.querySelectorAll('.btn').forEach(z=>z.onclick=()=>{document.querySelectorAll('.btn').forEach(y=>y.classList.remove('on'));z.classList.add('on');filter=z.dataset.f;render()});load();setInterval(load,10000)
+</script></body></html>"""
+
+@app.get("/dashboard",response_class=HTMLResponse)
+async def dashboard():
+    return HTMLResponse(DASHBOARD)
 
 @app.get("/health")
 async def health():
